@@ -7,11 +7,11 @@ from loguru import logger
 import queue
 import threading
 from typing import List
-from object_detection_utils import ObjectDetectionUtils
+from .object_detection_utils import ObjectDetectionUtils
 
 # Add the parent directory to the system path to access utils module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from utils import HailoAsyncInference, validate_images
+from core.utils import HailoAsyncInference, validate_images
 
 def preprocess_single_image(image: np.ndarray, input_queue: queue.Queue, width: int, height: int, utils: ObjectDetectionUtils) -> None:
     """

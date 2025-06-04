@@ -13,9 +13,9 @@ from datetime import datetime
 from dotenv import load_dotenv
 from pathlib import Path
 from picamera2 import Picamera2
-from object_detection_utils import ObjectDetectionUtils
-from detection import run_inference
-from classification import infer_image
+from models.object_detection_utils import ObjectDetectionUtils
+from models.detection import run_inference
+from models.classification import infer_image
 from sensing_garden_client import SensingGardenClient
 
 # Load environment variables from .env file
@@ -26,8 +26,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class InferenceProcessor:
-    def __init__(self, model_path="small-generic.hef", labels_path="labels.txt", 
-                 classification_model="london_141-multitask.hef", class_names_path="london_invertebrates.txt", 
+    def __init__(self, model_path="weights/small-generic.hef", labels_path="data/labels.txt", 
+                 classification_model="weights/london_141-multitask.hef", class_names_path="data/london_invertebrates.txt", 
                  batch_size=1, confidence_threshold=0.35, enable_uploads=True):
         
         self.model_path = model_path
