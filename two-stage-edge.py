@@ -6,11 +6,15 @@ import requests
 import logging
 import numpy as np
 from datetime import datetime
+from dotenv import load_dotenv
 from picamera2 import Picamera2
 from object_detection_utils import ObjectDetectionUtils
 from detection import run_inference
 from classification import infer_image  # Import the classification function
 from sensing_garden_client import SensingGardenClient
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
