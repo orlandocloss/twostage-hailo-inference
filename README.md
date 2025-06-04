@@ -100,44 +100,18 @@ AWS_REGION=us-east-1
 | `AWS_SECRET_ACCESS_KEY` | Yes | AWS secret key for S3 storage | None |
 | `AWS_REGION` | No | AWS region for S3 bucket | `us-east-1` |
 
-### 3. Model Files
+### 3. Device and Model Configuration
 
-Ensure you have the required model files in the `weights/` directory:
-- `small-generic.hef` - Object detection model
-- `london_141-multitask.hef` - Species classification model
+The system uses hardcoded device and model identifiers for database uploads. To customize these, edit the following lines in `run.py`:
 
-## Dependencies
-
-The system requires the following Python packages:
-- `opencv-python` (cv2)
-- `numpy`
-- `picamera2` (for Raspberry Pi camera)
-- `python-dotenv`
-- `requests`
-- `loguru`
-- `hailo-platform` (Hailo SDK)
-- Custom: `sensing_garden_client`
-
-## Usage Examples
-
-### Basic Real-time Inference
-```bash
-# Start camera with local inference only
-python3 run.py --realtime
+```python
+# In the InferenceProcessor.__init__ method (around line 38-39)
+self.device_id = "test_edge_images"  # Change this to your device identifier
+self.model_id = "london_141"         # Change this to your model identifier
 ```
 
-### Real-time with Database Upload
-```bash
-# Start camera with database uploads (may impact performance)
-python3 run.py --realtime --enable-uploads
-```
+These values are used to tag your detections in the database for organization and tracking purposes.
 
-### Batch Process Images
-```bash
-# Process all images in a folder
-python3 run.py --directory ./test_images/
+### 4. Model Files
 
-# Process images from absolute path
-python3 run.py --directory /home/user/photos/insects/
-```
-
+Ensure you have the required model files in the `
