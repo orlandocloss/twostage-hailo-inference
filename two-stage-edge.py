@@ -174,12 +174,15 @@ class InferenceProcessor:
     def upload_detection(self, frame, detection_data, timestamp):
         """Queue detection for async upload or upload immediately"""
         if self.enable_uploads:
+            print(f"Queueing detection for upload: {detection_data['species']}")
             if hasattr(self, 'upload_queue'):
                 # Async upload via queue
                 self.upload_queue.put((frame.copy(), detection_data, timestamp))
             else:
                 # Direct upload (fallback)
                 self._perform_upload(frame, detection_data, timestamp)
+        else:
+            print(f"Upload disabled - detected: {detection_data['species']}")
     
     def process_classification_results(self, classification_results, detection_data):
         for stream_name, result in classification_results.items():
@@ -227,10 +230,13 @@ class InferenceProcessor:
             save_stream_output=False
         )
         
+        print(f"Found {len(infer_results)} raw detections")
+        
         bgr_frame = frame.copy()
         
         if show_boxes and len(infer_results) > 0:
             height, width = frame.shape[:2]
+            valid_detections = 0
             
             for detection in infer_results:
                 if len(detection) != 5:
@@ -239,7 +245,11 @@ class InferenceProcessor:
                 y_min, x_min, y_max, x_max, confidence = detection
                 
                 if confidence < self.confidence_threshold:
+                    print(f"Skipping detection with confidence {confidence:.3f} (threshold: {self.confidence_threshold})")
                     continue
+                
+                valid_detections += 1
+                print(f"Processing detection {valid_detections} with confidence {confidence:.3f}")
                 
                 x, y = int(x_min * width), int(y_min * height)
                 x2, y2 = int(x_max * width), int(y_max * height)
@@ -251,6 +261,7 @@ class InferenceProcessor:
                 x, y, x2, y2 = max(0, x), max(0, y), min(width, x2), min(height, y2)
                 
                 if x2 <= x or y2 <= y:
+                    print(f"Invalid crop dimensions: ({x}, {y}, {x2}, {y2})")
                     continue
                 
                 cropped_region = cv2.resize(frame[y:y2, x:x2], (224, 224))
@@ -268,6 +279,8 @@ class InferenceProcessor:
                 
                 timestamp = datetime.now().isoformat()
                 self.upload_detection(bgr_frame, detection_data, timestamp)
+            
+            print(f"Processed {valid_detections} valid detections (confidence >= {self.confidence_threshold})")
         
         return bgr_frame
 
@@ -286,7 +299,9 @@ def run_realtime():
     picam2 = initialize_camera()
     
     frame_count = 0
-    print("Starting real-time inference... (uploads disabled for performance)")
+    print("Starting real-time inference...")
+    print("NOTE: Database uploads are DISABLED in real-time mode for better performance")
+    print("Use --directory mode to process images with database uploads")
     
     try:
         while True:
@@ -313,6 +328,8 @@ def run_realtime():
 def run_directory(directory_path):
     # Enable uploads for directory processing since speed is less critical
     processor = InferenceProcessor(enable_uploads=True)
+    
+    print("Directory mode: Database uploads are ENABLED")
     
     try:
         if not os.path.exists(directory_path):
