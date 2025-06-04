@@ -115,21 +115,30 @@ class InsectTracker:
         assigned_curr_indices = set()
         track_ids = [None] * len(new_boxes)
         
+        print(f"DEBUG: Hungarian assignment - rows: {row_indices}, cols: {col_indices}")
+        print(f"DEBUG: Cost threshold: {self.cost_threshold}")
+        
         for i, j in zip(row_indices, col_indices):
             # Only consider valid assignments (not dummy rows/columns)
             if i < n_prev and j < n_curr:
+                cost = cost_matrix[i, j]
+                print(f"DEBUG: Checking assignment {i}->{j}, cost: {cost:.3f}")
                 # Check if cost is below threshold
-                if cost_matrix[i, j] < self.cost_threshold:
+                if cost < self.cost_threshold:
                     # Assign the track ID from previous box to current box
                     new_boxes[j].track_id = self.current_tracks[i].track_id
                     track_ids[j] = self.current_tracks[i].track_id
                     assigned_curr_indices.add(j)
+                    print(f"DEBUG: Assigned track ID {self.current_tracks[i].track_id} to detection {j}")
+                else:
+                    print(f"DEBUG: Cost {cost:.3f} above threshold {self.cost_threshold}, not assigning")
         
         # Assign new track IDs to unassigned current boxes (new insects)
         for j in range(n_curr):
             if j not in assigned_curr_indices:
                 new_boxes[j].track_id = self.next_track_id
                 track_ids[j] = self.next_track_id
+                print(f"DEBUG: Assigned NEW track ID {self.next_track_id} to detection {j}")
                 self.next_track_id += 1
         
         # Update current tracks

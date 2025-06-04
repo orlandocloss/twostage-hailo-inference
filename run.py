@@ -237,8 +237,9 @@ class InferenceProcessor:
         # Initialize tracker on first frame
         if self.tracker is None:
             height, width = frame.shape[:2]
-            self.tracker = InsectTracker(height, width)
-            print(f"Initialized tracker for {width}x{height} frame")
+            # Use more lenient parameters for better tracking
+            self.tracker = InsectTracker(height, width, max_frames=30, w_dist=0.7, w_area=0.3, cost_threshold=1.2)
+            print(f"Initialized tracker for {width}x{height} frame with relaxed cost threshold")
         
         infer_results = run_inference(
             net=self.model_path,
@@ -295,9 +296,16 @@ class InferenceProcessor:
             # Get track IDs from tracker
             track_ids = []
             if valid_detections:
-                track_ids = self.tracker.update(valid_detections, self.frame_count)
                 if show_boxes:
-                    print(f"Tracker assigned {len(track_ids)} track IDs")
+                    print(f"Frame {self.frame_count}: Sending {len(valid_detections)} detections to tracker")
+                    print(f"Current tracker has {len(self.tracker.current_tracks)} existing tracks")
+                
+                track_ids = self.tracker.update(valid_detections, self.frame_count)
+                
+                if show_boxes:
+                    print(f"Tracker returned IDs: {track_ids}")
+                    print(f"Tracker now has {len(self.tracker.current_tracks)} active tracks")
+                    print(f"Next track ID will be: {self.tracker.next_track_id}")
             
             # Second pass: process each detection with its track ID
             for i, det_data in enumerate(valid_detection_data):
