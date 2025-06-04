@@ -237,10 +237,10 @@ class InferenceProcessor:
         # Initialize tracker on first frame
         if self.tracker is None:
             height, width = frame.shape[:2]
-            # Use track memory of 5 frames - objects can disappear for up to 5 frames and still get same ID
+            # Use default track memory (equals max_frames) - objects can be matched within full history window
             self.tracker = InsectTracker(height, width, max_frames=30, w_dist=0.7, w_area=0.3, 
-                                       cost_threshold=0.8, track_memory_frames=5)
-            print(f"Initialized tracker for {width}x{height} frame with 5-frame track memory")
+                                       cost_threshold=0.8)
+            print(f"Initialized tracker for {width}x{height} frame with intelligent track memory")
         
         infer_results = run_inference(
             net=self.model_path,

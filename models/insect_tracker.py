@@ -25,7 +25,7 @@ class BoundingBox:
         return cls(x1, y1, width, height, frame_id, track_id)
 
 class InsectTracker:
-    def __init__(self, image_height, image_width, max_frames=30, w_dist=0.7, w_area=0.3, cost_threshold=0.8, track_memory_frames=10):
+    def __init__(self, image_height, image_width, max_frames=30, w_dist=0.7, w_area=0.3, cost_threshold=0.8, track_memory_frames=None):
         self.image_height = image_height
         self.image_width = image_width
         self.max_dist = np.sqrt(image_height**2 + image_width**2)
@@ -33,7 +33,10 @@ class InsectTracker:
         self.w_dist = w_dist
         self.w_area = w_area
         self.cost_threshold = cost_threshold
-        self.track_memory_frames = track_memory_frames  # How many frames to remember lost tracks
+        
+        # If track_memory_frames not specified, use max_frames (full history window)
+        self.track_memory_frames = track_memory_frames if track_memory_frames is not None else max_frames
+        print(f"DEBUG: Tracker initialized with max_frames={max_frames}, track_memory_frames={self.track_memory_frames}")
         
         self.tracking_history = deque(maxlen=max_frames)
         self.current_tracks = []
