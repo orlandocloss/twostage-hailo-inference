@@ -33,7 +33,7 @@ class InferenceProcessor:
         self.classification_model = classification_model
         self.batch_size = batch_size
         self.confidence_threshold = confidence_threshold
-        self.device_id = "test_edge"
+        self.device_id = "test_edge_images"
         self.model_id = "london_141"
         
         self.class_names = self.load_class_names(class_names_path)
