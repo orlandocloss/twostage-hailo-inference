@@ -10,6 +10,7 @@ from picamera2 import Picamera2
 from object_detection_utils import ObjectDetectionUtils
 from detection import run_inference
 from classification import infer_image  # Import the classification function
+from sensing_garden_client import SensingGardenClient
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -59,6 +60,18 @@ class SimpleInference:
         
         # Initialize detection utils
         self.det_utils = ObjectDetectionUtils(labels_path)
+        
+        # Initialize SensingGardenClient for database uploads
+        self.device_id = "test_edge"
+        self.model_id = "london_141"
+        
+        self.sgc = SensingGardenClient(
+            base_url=os.environ.get('API_BASE_URL'),
+            api_key=os.environ.get('SENSING_GARDEN_API_KEY'),
+            aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+            aws_region=os.environ.get('AWS_REGION', 'us-east-1')
+        )
         
         # Wait a moment for initialization
         time.sleep(1)
@@ -144,6 +157,53 @@ class SimpleInference:
         logger.info(f"Taxonomy built: {num_families} families, {num_genera} genera, {num_species} species")
         return taxonomy
         
+    def convert_bbox_to_normalized(self, x, y, x2, y2, width, height):
+        """
+        Convert bounding box from absolute coordinates to normalized format.
+        Input: x, y, x2, y2 (absolute coordinates), width, height (image dimensions)
+        Output: x_center, y_center, width, height (normalized 0-1)
+        """
+        # Calculate center coordinates
+        x_center = (x + x2) / 2.0 / width
+        y_center = (y + y2) / 2.0 / height
+        
+        # Calculate normalized width and height
+        norm_width = (x2 - x) / width
+        norm_height = (y2 - y) / height
+        
+        return [x_center, y_center, norm_width, norm_height]
+    
+    def upload_detection(self, frame, detection_data, timestamp):
+        """
+        Upload detection results to the database via SensingGardenClient.
+        """
+        try:
+            # Convert frame to bytes
+            _, buffer = cv2.imencode('.jpg', frame)
+            image_data = buffer.tobytes()
+            
+            # Upload to database
+            self.sgc.classifications.add(
+                device_id=self.device_id,
+                model_id=self.model_id,
+                image_data=image_data,
+                family=detection_data["family"],
+                genus=detection_data["genus"],
+                species=detection_data["species"],
+                family_confidence=detection_data["family_confidence"],
+                genus_confidence=detection_data["genus_confidence"],
+                species_confidence=detection_data["species_confidence"],
+                timestamp=timestamp,
+                bounding_box=detection_data["bbox"],
+                track_id=detection_data["track_id"]
+            )
+            print(f"Successfully uploaded detection to database")
+            
+        except Exception as e:
+            print(f"Error uploading detection to database: {e}")
+            import traceback
+            traceback.print_exc()
+        
     def process_frame(self, frame):
         # Get inference results using run_inference
         infer_results = run_inference(
@@ -213,6 +273,18 @@ class SimpleInference:
                         print(f"\n--- Classifying object at coordinates: ({x}, {y}, {x2}, {y2}) ---")
                         classification_results = infer_image(cropped_region_resized, hef_path=self.classification_model)
                         
+                        # Initialize detection data for database upload
+                        detection_data = {
+                            "family": None,
+                            "genus": None,
+                            "species": None,
+                            "family_confidence": None,
+                            "genus_confidence": None,
+                            "species_confidence": None,
+                            "bbox": self.convert_bbox_to_normalized(x, y, x2, y2, width, height),
+                            "track_id": None  # No tracking yet
+                        }
+                        
                         # Print classification results and draw class name with highest probability
                         for stream_name, result in classification_results.items():
                             print(f"Output stream: {stream_name}")
@@ -221,11 +293,6 @@ class SimpleInference:
                             
                             # Check if this is the species output stream (shape should be (141,))
                             if result.shape == (141,):
-                                # Get top classes
-                                top_classes = np.argsort(result)[::-1][:5]  # Top 5 classes
-                                print(f"Top 5 classes: {top_classes}")
-                                print(f"Top 5 probabilities: {result[top_classes]}")
-                                
                                 # Get highest probability and find all classes with equally high probabilities
                                 max_prob = np.max(result)
                                 tolerance = 0.01  # Tolerance for considering probabilities as equal
@@ -240,6 +307,10 @@ class SimpleInference:
                                     if self.class_names and idx < len(self.class_names):
                                         species_name = self.class_names[idx]
                                     species_labels.append(f"{species_name}({result[idx]:.2f})")
+                                
+                                # Store for database upload
+                                detection_data["species"] = " | ".join([self.class_names[idx] if self.class_names and idx < len(self.class_names) else f"Species {idx}" for idx in top_indices])
+                                detection_data["species_confidence"] = float(max_prob)
                                 
                                 # Draw species labels on the image
                                 label = " | ".join(species_labels)
@@ -263,6 +334,10 @@ class SimpleInference:
                                         genus_name = self.genera[idx]
                                     genus_labels.append(f"{genus_name}({result[idx]:.2f})")
                                 
+                                # Store for database upload
+                                detection_data["genus"] = " | ".join([self.genera[idx] if self.genera and idx < len(self.genera) else f"Genus {idx}" for idx in top_indices])
+                                detection_data["genus_confidence"] = float(max_prob)
+                                
                                 # Draw genus labels on the image
                                 label = " | ".join(genus_labels)
                                 cv2.putText(bgr_frame, label, (x, y2 + 40), 
@@ -285,11 +360,19 @@ class SimpleInference:
                                         family_name = self.families[idx]
                                     family_labels.append(f"{family_name}({result[idx]:.2f})")
                                 
+                                # Store for database upload
+                                detection_data["family"] = " | ".join([self.families[idx] if self.families and idx < len(self.families) else f"Family {idx}" for idx in top_indices])
+                                detection_data["family_confidence"] = float(max_prob)
+                                
                                 # Draw family name and probability on the imageSSS
                                 label = " | ".join(family_labels)
                                 cv2.putText(bgr_frame, label, (x, y2 + 60), 
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
-                    
+                        
+                        # Upload detection to database
+                        timestamp = datetime.now().isoformat()
+                        self.upload_detection(bgr_frame, detection_data, timestamp)
+                            
                     except Exception as e:
                         print(f"Error in classification: {e}")
                         import traceback
