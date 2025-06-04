@@ -16,6 +16,7 @@ from picamera2 import Picamera2
 from models.object_detection_utils import ObjectDetectionUtils
 from models.detection import run_inference
 from models.classification import infer_image
+from models.insect_tracker import InsectTracker
 from sensing_garden_client import SensingGardenClient
 
 # Load environment variables from .env file
@@ -38,6 +39,10 @@ class InferenceProcessor:
         self.device_id = "test_edge_images"
         self.model_id = "london_141"
         self.enable_uploads = enable_uploads
+        
+        # Initialize tracker (will be set up when we know frame dimensions)
+        self.tracker = None
+        self.frame_count = 0
         
         self.class_names = self.load_class_names(class_names_path)
         self.families, self.genera, self.genus_to_family, self.species_to_genus = self.build_taxonomy()
@@ -226,6 +231,15 @@ class InferenceProcessor:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
     
     def process_frame(self, frame, show_boxes=True):
+        # Increment frame counter
+        self.frame_count += 1
+        
+        # Initialize tracker on first frame
+        if self.tracker is None:
+            height, width = frame.shape[:2]
+            self.tracker = InsectTracker(height, width)
+            print(f"Initialized tracker for {width}x{height} frame")
+        
         infer_results = run_inference(
             net=self.model_path,
             input=frame,
@@ -242,7 +256,10 @@ class InferenceProcessor:
         
         if len(infer_results) > 0:
             height, width = frame.shape[:2]
-            valid_detections = 0
+            
+            # First pass: collect all valid detections for tracking
+            valid_detections = []
+            valid_detection_data = []
             
             for detection in infer_results:
                 if len(detection) != 5:
@@ -255,18 +272,11 @@ class InferenceProcessor:
                         print(f"Skipping detection with confidence {confidence:.3f} (threshold: {self.confidence_threshold})")
                     continue
                 
-                valid_detections += 1
-                if show_boxes:  # Only show in real-time mode
-                    print(f"Processing detection {valid_detections} with confidence {confidence:.3f}")
-                
+                # Convert to pixel coordinates
                 x, y = int(x_min * width), int(y_min * height)
                 x2, y2 = int(x_max * width), int(y_max * height)
                 
-                if show_boxes:
-                    cv2.rectangle(bgr_frame, (x, y), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(bgr_frame, f"{confidence:.2f}", (x, y - 10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                
+                # Clamp coordinates
                 x, y, x2, y2 = max(0, x), max(0, y), min(width, x2), min(height, y2)
                 
                 if x2 <= x or y2 <= y:
@@ -274,6 +284,41 @@ class InferenceProcessor:
                         print(f"Invalid crop dimensions: ({x}, {y}, {x2}, {y2})")
                     continue
                 
+                # Store detection for tracking (x1, y1, x2, y2 format)
+                valid_detections.append([x, y, x2, y2])
+                valid_detection_data.append({
+                    'detection': detection,
+                    'x': x, 'y': y, 'x2': x2, 'y2': y2,
+                    'confidence': confidence
+                })
+            
+            # Get track IDs from tracker
+            track_ids = []
+            if valid_detections:
+                track_ids = self.tracker.update(valid_detections, self.frame_count)
+                if show_boxes:
+                    print(f"Tracker assigned {len(track_ids)} track IDs")
+            
+            # Second pass: process each detection with its track ID
+            for i, det_data in enumerate(valid_detection_data):
+                x, y, x2, y2 = det_data['x'], det_data['y'], det_data['x2'], det_data['y2']
+                confidence = det_data['confidence']
+                track_id = track_ids[i] if i < len(track_ids) else None
+                
+                if show_boxes:  # Only show in real-time mode
+                    print(f"Processing detection {i+1} with confidence {confidence:.3f}, track_id: {track_id}")
+                
+                # Draw bounding box and track ID
+                if show_boxes:
+                    cv2.rectangle(bgr_frame, (x, y), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(bgr_frame, f"{confidence:.2f}", (x, y - 10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    # Draw track ID
+                    if track_id is not None:
+                        cv2.putText(bgr_frame, f"ID:{track_id}", (x, y - 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                
+                # Perform classification
                 cropped_region = cv2.resize(frame[y:y2, x:x2], (224, 224))
                 classification_results = infer_image(cropped_region, hef_path=self.classification_model)
                 
@@ -281,7 +326,7 @@ class InferenceProcessor:
                     "family": None, "genus": None, "species": None,
                     "family_confidence": None, "genus_confidence": None, "species_confidence": None,
                     "bbox": self.convert_bbox_to_normalized(x, y, x2, y2, width, height),
-                    "track_id": None
+                    "track_id": track_id
                 }
                 
                 detection_data = self.process_classification_results(classification_results, detection_data)
@@ -293,10 +338,10 @@ class InferenceProcessor:
                 self.upload_detection(bgr_frame, detection_data, timestamp)
             
             # Summary message for directory mode
-            if not show_boxes and valid_detections > 0:
-                print(f"   📊 Found {valid_detections} detection(s) above confidence threshold")
+            if not show_boxes and len(valid_detection_data) > 0:
+                print(f"   📊 Found {len(valid_detection_data)} detection(s) above confidence threshold")
             elif show_boxes:
-                print(f"Processed {valid_detections} valid detections (confidence >= {self.confidence_threshold})")
+                print(f"Processed {len(valid_detection_data)} valid detections (confidence >= {self.confidence_threshold})")
         else:
             if not show_boxes:
                 print("   📊 No detections found")
