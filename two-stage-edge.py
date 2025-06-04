@@ -235,7 +235,7 @@ def initialize_camera():
     return picam2
 
 def run_realtime():
-    processor = InferenceProcessor(show_boxes=True)
+    processor = InferenceProcessor()
     picam2 = initialize_camera()
     
     frame_count = 0
