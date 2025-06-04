@@ -25,7 +25,7 @@ class BoundingBox:
         return cls(x1, y1, width, height, frame_id, track_id)
 
 class InsectTracker:
-    def __init__(self, image_height, image_width, max_frames=30, w_dist=0.7, w_area=0.3, cost_threshold=0.8):
+    def __init__(self, image_height, image_width, max_frames=30, w_dist=0.7, w_area=0.3, cost_threshold=0.8, track_memory_frames=10):
         self.image_height = image_height
         self.image_width = image_width
         self.max_dist = np.sqrt(image_height**2 + image_width**2)
@@ -33,9 +33,11 @@ class InsectTracker:
         self.w_dist = w_dist
         self.w_area = w_area
         self.cost_threshold = cost_threshold
+        self.track_memory_frames = track_memory_frames  # How many frames to remember lost tracks
         
         self.tracking_history = deque(maxlen=max_frames)
         self.current_tracks = []
+        self.lost_tracks = {}  # track_id -> {box: BoundingBox, frames_lost: int}
         self.next_track_id = 0
     
     def calculate_cost(self, box1, box2):
@@ -87,6 +89,27 @@ class InsectTracker:
         Returns:
             List of track IDs corresponding to each detection
         """
+        # Handle empty detection list (no detections in this frame)
+        if not new_detections:
+            print(f"DEBUG: Frame {frame_id} has no detections")
+            # Move all current tracks to lost tracks
+            for track in self.current_tracks:
+                if track.track_id not in self.lost_tracks:
+                    self.lost_tracks[track.track_id] = {
+                        'box': track,
+                        'frames_lost': 1
+                    }
+                    print(f"DEBUG: Moved track {track.track_id} to lost tracks")
+                else:
+                    self.lost_tracks[track.track_id]['frames_lost'] += 1
+            
+            # Age lost tracks and remove old ones
+            self._age_lost_tracks()
+            
+            self.current_tracks = []
+            self.tracking_history.append([])
+            return []
+        
         # Convert YOLO detections to BoundingBox objects
         new_boxes = []
         for i, detection in enumerate(new_detections):
@@ -94,19 +117,42 @@ class InsectTracker:
             bbox = BoundingBox.from_xyxy(x1, y1, x2, y2, frame_id)
             new_boxes.append(bbox)
         
-        # If this is the first frame, assign new track IDs to all boxes
-        if not self.current_tracks:
+        # If this is the first frame or no existing tracks, assign new track IDs to all boxes
+        if not self.current_tracks and not self.lost_tracks:
             track_ids = []
             for box in new_boxes:
                 box.track_id = self.next_track_id
                 track_ids.append(self.next_track_id)
+                print(f"DEBUG: FIRST FRAME - Assigned track ID {self.next_track_id} to new detection")
                 self.next_track_id += 1
             self.current_tracks = new_boxes
             self.tracking_history.append(new_boxes)
             return track_ids
         
-        # Build cost matrix
-        cost_matrix, n_prev, n_curr = self.build_cost_matrix(self.current_tracks, new_boxes)
+        # Combine current tracks and lost tracks for matching
+        all_previous_tracks = self.current_tracks.copy()
+        lost_track_list = []
+        
+        for track_id, lost_info in self.lost_tracks.items():
+            lost_track_list.append(lost_info['box'])
+            lost_track_list[-1].track_id = track_id  # Ensure track_id is preserved
+        
+        all_previous_tracks.extend(lost_track_list)
+        
+        if not all_previous_tracks:
+            # No previous tracks at all, assign new IDs
+            track_ids = []
+            for box in new_boxes:
+                box.track_id = self.next_track_id
+                track_ids.append(self.next_track_id)
+                print(f"DEBUG: No previous tracks - Assigned track ID {self.next_track_id} to new detection")
+                self.next_track_id += 1
+            self.current_tracks = new_boxes
+            self.tracking_history.append(new_boxes)
+            return track_ids
+        
+        # Build cost matrix including lost tracks
+        cost_matrix, n_prev, n_curr = self.build_cost_matrix(all_previous_tracks, new_boxes)
         
         # Apply Hungarian algorithm
         row_indices, col_indices = linear_sum_assignment(cost_matrix)
@@ -114,9 +160,11 @@ class InsectTracker:
         # Assign track IDs based on the matching
         assigned_curr_indices = set()
         track_ids = [None] * len(new_boxes)
+        recovered_tracks = set()  # Track IDs that were recovered from lost tracks
         
         print(f"DEBUG: Hungarian assignment - rows: {row_indices}, cols: {col_indices}")
         print(f"DEBUG: Cost threshold: {self.cost_threshold}")
+        print(f"DEBUG: Current tracks: {len(self.current_tracks)}, Lost tracks: {len(self.lost_tracks)}")
         
         for i, j in zip(row_indices, col_indices):
             # Only consider valid assignments (not dummy rows/columns)
@@ -126,12 +174,23 @@ class InsectTracker:
                 # Check if cost is below threshold
                 if cost < self.cost_threshold:
                     # Assign the track ID from previous box to current box
-                    new_boxes[j].track_id = self.current_tracks[i].track_id
-                    track_ids[j] = self.current_tracks[i].track_id
+                    prev_track_id = all_previous_tracks[i].track_id
+                    new_boxes[j].track_id = prev_track_id
+                    track_ids[j] = prev_track_id
                     assigned_curr_indices.add(j)
-                    print(f"DEBUG: Assigned track ID {self.current_tracks[i].track_id} to detection {j}")
+                    
+                    # Check if this was a lost track being recovered
+                    if prev_track_id in self.lost_tracks:
+                        recovered_tracks.add(prev_track_id)
+                        print(f"DEBUG: RECOVERED lost track ID {prev_track_id} for detection {j} (was lost for {self.lost_tracks[prev_track_id]['frames_lost']} frames)")
+                    else:
+                        print(f"DEBUG: Continued track ID {prev_track_id} for detection {j}")
                 else:
                     print(f"DEBUG: Cost {cost:.3f} above threshold {self.cost_threshold}, not assigning")
+        
+        # Remove recovered tracks from lost tracks
+        for track_id in recovered_tracks:
+            del self.lost_tracks[track_id]
         
         # Assign new track IDs to unassigned current boxes (new insects)
         for j in range(n_curr):
@@ -141,10 +200,36 @@ class InsectTracker:
                 print(f"DEBUG: Assigned NEW track ID {self.next_track_id} to detection {j}")
                 self.next_track_id += 1
         
+        # Move unmatched current tracks to lost tracks (tracks that disappeared this frame)
+        matched_track_ids = {track_ids[j] for j in assigned_curr_indices if track_ids[j] is not None}
+        for track in self.current_tracks:
+            if track.track_id not in matched_track_ids and track.track_id not in recovered_tracks:
+                if track.track_id not in self.lost_tracks:
+                    self.lost_tracks[track.track_id] = {
+                        'box': track,
+                        'frames_lost': 1
+                    }
+                    print(f"DEBUG: Track {track.track_id} disappeared, moved to lost tracks")
+        
+        # Age lost tracks and remove old ones
+        self._age_lost_tracks()
+        
         # Update current tracks
         self.current_tracks = new_boxes
         
         # Add to tracking history
         self.tracking_history.append(new_boxes)
         
-        return track_ids 
+        return track_ids
+    
+    def _age_lost_tracks(self):
+        """Age lost tracks and remove those that have been lost too long"""
+        tracks_to_remove = []
+        for track_id, lost_info in self.lost_tracks.items():
+            lost_info['frames_lost'] += 1
+            if lost_info['frames_lost'] > self.track_memory_frames:
+                tracks_to_remove.append(track_id)
+                print(f"DEBUG: Permanently removing track {track_id} (lost for {lost_info['frames_lost']} frames)")
+        
+        for track_id in tracks_to_remove:
+            del self.lost_tracks[track_id] 

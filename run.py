@@ -237,9 +237,10 @@ class InferenceProcessor:
         # Initialize tracker on first frame
         if self.tracker is None:
             height, width = frame.shape[:2]
-            # Use more lenient parameters for better tracking
-            self.tracker = InsectTracker(height, width, max_frames=30, w_dist=0.7, w_area=0.3, cost_threshold=1.2)
-            print(f"Initialized tracker for {width}x{height} frame with relaxed cost threshold")
+            # Use track memory of 5 frames - objects can disappear for up to 5 frames and still get same ID
+            self.tracker = InsectTracker(height, width, max_frames=30, w_dist=0.7, w_area=0.3, 
+                                       cost_threshold=0.8, track_memory_frames=5)
+            print(f"Initialized tracker for {width}x{height} frame with 5-frame track memory")
         
         infer_results = run_inference(
             net=self.model_path,
@@ -255,12 +256,12 @@ class InferenceProcessor:
         
         bgr_frame = frame.copy()
         
+        # First pass: collect all valid detections for tracking
+        valid_detections = []
+        valid_detection_data = []
+        
         if len(infer_results) > 0:
             height, width = frame.shape[:2]
-            
-            # First pass: collect all valid detections for tracking
-            valid_detections = []
-            valid_detection_data = []
             
             for detection in infer_results:
                 if len(detection) != 5:
@@ -292,67 +293,65 @@ class InferenceProcessor:
                     'x': x, 'y': y, 'x2': x2, 'y2': y2,
                     'confidence': confidence
                 })
+        
+        # ALWAYS update tracker with detections (even if empty list)
+        track_ids = []
+        if show_boxes:
+            print(f"Frame {self.frame_count}: Sending {len(valid_detections)} detections to tracker")
+            print(f"Current tracker has {len(self.tracker.current_tracks)} existing tracks")
+        
+        track_ids = self.tracker.update(valid_detections, self.frame_count)
+        
+        if show_boxes:
+            print(f"Tracker returned IDs: {track_ids}")
+            print(f"Tracker now has {len(self.tracker.current_tracks)} active tracks")
+            print(f"Next track ID will be: {self.tracker.next_track_id}")
+        
+        # Process each detection with its track ID
+        for i, det_data in enumerate(valid_detection_data):
+            x, y, x2, y2 = det_data['x'], det_data['y'], det_data['x2'], det_data['y2']
+            confidence = det_data['confidence']
+            track_id = track_ids[i] if i < len(track_ids) else None
             
-            # Get track IDs from tracker
-            track_ids = []
-            if valid_detections:
-                if show_boxes:
-                    print(f"Frame {self.frame_count}: Sending {len(valid_detections)} detections to tracker")
-                    print(f"Current tracker has {len(self.tracker.current_tracks)} existing tracks")
-                
-                track_ids = self.tracker.update(valid_detections, self.frame_count)
-                
-                if show_boxes:
-                    print(f"Tracker returned IDs: {track_ids}")
-                    print(f"Tracker now has {len(self.tracker.current_tracks)} active tracks")
-                    print(f"Next track ID will be: {self.tracker.next_track_id}")
+            if show_boxes:  # Only show in real-time mode
+                print(f"Processing detection {i+1} with confidence {confidence:.3f}, track_id: {track_id}")
             
-            # Second pass: process each detection with its track ID
-            for i, det_data in enumerate(valid_detection_data):
-                x, y, x2, y2 = det_data['x'], det_data['y'], det_data['x2'], det_data['y2']
-                confidence = det_data['confidence']
-                track_id = track_ids[i] if i < len(track_ids) else None
-                
-                if show_boxes:  # Only show in real-time mode
-                    print(f"Processing detection {i+1} with confidence {confidence:.3f}, track_id: {track_id}")
-                
-                # Draw bounding box and track ID
-                if show_boxes:
-                    cv2.rectangle(bgr_frame, (x, y), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(bgr_frame, f"{confidence:.2f}", (x, y - 10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                    # Draw track ID
-                    if track_id is not None:
-                        cv2.putText(bgr_frame, f"ID:{track_id}", (x, y - 30), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                
-                # Perform classification
-                cropped_region = cv2.resize(frame[y:y2, x:x2], (224, 224))
-                classification_results = infer_image(cropped_region, hef_path=self.classification_model)
-                
-                detection_data = {
-                    "family": None, "genus": None, "species": None,
-                    "family_confidence": None, "genus_confidence": None, "species_confidence": None,
-                    "bbox": self.convert_bbox_to_normalized(x, y, x2, y2, width, height),
-                    "track_id": track_id
-                }
-                
-                detection_data = self.process_classification_results(classification_results, detection_data)
-                
-                if show_boxes:
-                    self.draw_classification_labels(bgr_frame, x, y2, detection_data)
-                
-                timestamp = datetime.now().isoformat()
-                self.upload_detection(bgr_frame, detection_data, timestamp)
+            # Draw bounding box and track ID
+            if show_boxes:
+                cv2.rectangle(bgr_frame, (x, y), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(bgr_frame, f"{confidence:.2f}", (x, y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                # Draw track ID
+                if track_id is not None:
+                    cv2.putText(bgr_frame, f"ID:{track_id}", (x, y - 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
             
-            # Summary message for directory mode
-            if not show_boxes and len(valid_detection_data) > 0:
-                print(f"   📊 Found {len(valid_detection_data)} detection(s) above confidence threshold")
-            elif show_boxes:
-                print(f"Processed {len(valid_detection_data)} valid detections (confidence >= {self.confidence_threshold})")
-        else:
-            if not show_boxes:
-                print("   📊 No detections found")
+            # Perform classification
+            cropped_region = cv2.resize(frame[y:y2, x:x2], (224, 224))
+            classification_results = infer_image(cropped_region, hef_path=self.classification_model)
+            
+            detection_data = {
+                "family": None, "genus": None, "species": None,
+                "family_confidence": None, "genus_confidence": None, "species_confidence": None,
+                "bbox": self.convert_bbox_to_normalized(x, y, x2, y2, width, height),
+                "track_id": track_id
+            }
+            
+            detection_data = self.process_classification_results(classification_results, detection_data)
+            
+            if show_boxes:
+                self.draw_classification_labels(bgr_frame, x, y2, detection_data)
+            
+            timestamp = datetime.now().isoformat()
+            self.upload_detection(bgr_frame, detection_data, timestamp)
+        
+        # Summary message
+        if not show_boxes and len(valid_detection_data) > 0:
+            print(f"   📊 Found {len(valid_detection_data)} detection(s) above confidence threshold")
+        elif show_boxes:
+            print(f"Processed {len(valid_detection_data)} valid detections (confidence >= {self.confidence_threshold})")
+        elif not show_boxes:
+            print("   📊 No detections found")
         
         return bgr_frame
 
