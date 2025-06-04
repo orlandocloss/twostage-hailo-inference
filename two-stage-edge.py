@@ -112,13 +112,6 @@ class InferenceProcessor:
         norm_height = (y2 - y) / height
         return [x_center, y_center, norm_width, norm_height]
     
-    def preprocess_frame(self, frame):
-        """Convert frame from uint8 to float32 and normalize to avoid dtype conversion warning"""
-        if frame.dtype == np.uint8:
-            # Convert to float32 and normalize to [0, 1] range
-            frame = frame.astype(np.float32) / 255.0
-        return frame
-    
     def upload_detection(self, frame, detection_data, timestamp):
         try:
             _, buffer = cv2.imencode('.jpg', frame)
@@ -180,12 +173,9 @@ class InferenceProcessor:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
     
     def process_frame(self, frame, show_boxes=True):
-        # Preprocess frame to avoid dtype conversion warning
-        preprocessed_frame = self.preprocess_frame(frame)
-        
         infer_results = run_inference(
             net=self.model_path,
-            input=preprocessed_frame,
+            input=frame,
             batch_size=self.batch_size,
             labels=self.labels_path,
             save_stream_output=False
