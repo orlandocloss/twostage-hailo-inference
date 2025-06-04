@@ -158,9 +158,11 @@ class InferenceProcessor:
                 bounding_box=detection_data["bbox"],
                 track_id=detection_data["track_id"]
             )
-            print("Successfully uploaded detection to database")
+            print(f"✓ Successfully uploaded detection: {detection_data['species']}")
+            sys.stdout.flush()  # Ensure message is visible immediately
         except Exception as e:
-            print(f"Error uploading detection: {e}")
+            print(f"✗ Error uploading detection: {e}")
+            sys.stdout.flush()
     
     def shutdown(self):
         """Shutdown the upload worker thread"""
@@ -174,7 +176,8 @@ class InferenceProcessor:
     def upload_detection(self, frame, detection_data, timestamp):
         """Queue detection for async upload or upload immediately"""
         if self.enable_uploads:
-            print(f"Queueing detection for upload: {detection_data['species']}")
+            print(f"→ Queueing detection for upload: {detection_data['species']}")
+            sys.stdout.flush()
             if hasattr(self, 'upload_queue'):
                 # Async upload via queue
                 self.upload_queue.put((frame.copy(), detection_data, timestamp))
@@ -182,7 +185,8 @@ class InferenceProcessor:
                 # Direct upload (fallback)
                 self._perform_upload(frame, detection_data, timestamp)
         else:
-            print(f"Upload disabled - detected: {detection_data['species']}")
+            print(f"📷 Detected (upload disabled): {detection_data['species']}")
+            sys.stdout.flush()
     
     def process_classification_results(self, classification_results, detection_data):
         for stream_name, result in classification_results.items():
@@ -293,15 +297,19 @@ def initialize_camera():
     time.sleep(1)
     return picam2
 
-def run_realtime():
-    # Disable uploads for real-time to avoid frame skipping
-    processor = InferenceProcessor(enable_uploads=False)
+def run_realtime(enable_uploads=False):
+    processor = InferenceProcessor(enable_uploads=enable_uploads)
     picam2 = initialize_camera()
     
     frame_count = 0
     print("Starting real-time inference...")
-    print("NOTE: Database uploads are DISABLED in real-time mode for better performance")
-    print("Use --directory mode to process images with database uploads")
+    
+    if enable_uploads:
+        print("Database uploads are ENABLED in real-time mode")
+        print("WARNING: This may cause frame skipping due to network delays")
+    else:
+        print("NOTE: Database uploads are DISABLED in real-time mode for better performance")
+        print("Use --enable-uploads flag to enable uploads or --directory mode for batch processing")
     
     try:
         while True:
@@ -378,10 +386,13 @@ def main():
     group.add_argument('--realtime', action='store_true', help='Run real-time inference from camera')
     group.add_argument('--directory', type=str, help='Process images from directory')
     
+    parser.add_argument('--enable-uploads', action='store_true', 
+                       help='Enable database uploads in real-time mode (may cause frame skipping)')
+    
     args = parser.parse_args()
     
     if args.realtime:
-        run_realtime()
+        run_realtime(args.enable_uploads)
     elif args.directory:
         run_directory(args.directory)
 
