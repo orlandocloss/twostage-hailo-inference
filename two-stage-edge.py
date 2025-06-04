@@ -16,13 +16,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SimpleInference:
-    def __init__(self, model_path="small-generic.hef", labels_path="labels.txt", classification_model="london_141-multitask.hef", class_names_path="london_invertebrates.txt", batch_size=1, save_results=False, show_boxes=True):
+    def __init__(self, model_path="small-generic.hef", labels_path="labels.txt", classification_model="london_141-multitask.hef", class_names_path="london_invertebrates.txt", batch_size=1, show_boxes=True, confidence_threshold=0.35):
         self.model_path = model_path
         self.labels_path = labels_path
         self.classification_model = classification_model
         self.batch_size = batch_size
-        self.save_results = save_results
         self.show_boxes = show_boxes
+        self.confidence_threshold = confidence_threshold
         
         # Load class names
         self.class_names = []
@@ -49,12 +49,6 @@ class SimpleInference:
             self.genera = []
             self.genus_to_family = {}
             self.species_to_genus = {}
-        
-        # Create output directory for saving results
-        if self.save_results:
-            self.output_dir = os.path.join("output", datetime.now().strftime("%Y%m%d_%H%M%S"))
-            os.makedirs(self.output_dir, exist_ok=True)
-            print(f"Saving results to {self.output_dir}")
         
         # Initialize camera
         self.picam2 = Picamera2()
@@ -177,6 +171,11 @@ class SimpleInference:
                 # Extract bounding box coordinates (format is [y_min, x_min, y_max, x_max, confidence])
                 if len(detection) == 5:  # Ensure we have the expected format
                     y_min, x_min, y_max, x_max, confidence = detection
+                    
+                    # Apply confidence threshold filter
+                    if confidence < self.confidence_threshold:
+                        print(f"Skipping detection with confidence {confidence:.3f} (below threshold {self.confidence_threshold})")
+                        continue
                     
                     # Convert normalized coordinates to pixel coordinates
                     x = int(x_min * width)
@@ -320,12 +319,6 @@ class SimpleInference:
                     # Process the frame
                     processed_frame = self.process_frame(frame)
                     
-                    # Save results if enabled
-                    if self.save_results and processed_frame is not None:
-                        output_path = os.path.join(self.output_dir, f"frame_{frame_count:04d}.jpg")
-                        save_success = cv2.imwrite(output_path, processed_frame)
-                        print(f"Saved frame to {output_path}, success: {save_success}")
-                    
                     # Display the frame
                     cv2.imshow("Inference", processed_frame)
                     
@@ -360,5 +353,5 @@ class SimpleInference:
             self.picam2.stop()
 
 if __name__ == "__main__":
-    inference = SimpleInference(save_results=True, show_boxes=True)
+    inference = SimpleInference(show_boxes=True)
     inference.run()
