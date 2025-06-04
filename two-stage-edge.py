@@ -1,12 +1,19 @@
 import cv2
 import time
 import os
+import sys
+import requests
+import logging
 import numpy as np
 from datetime import datetime
 from picamera2 import Picamera2
 from object_detection_utils import ObjectDetectionUtils
 from detection import run_inference
 from classification import infer_image  # Import the classification function
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class SimpleInference:
     def __init__(self, model_path="small-generic.hef", labels_path="labels.txt", classification_model="london_141-multitask.hef", class_names_path="london_invertebrates.txt", batch_size=1, save_results=False, show_boxes=True):
@@ -26,6 +33,23 @@ class SimpleInference:
         except Exception as e:
             print(f"Error loading class names: {e}")
         
+        # Get taxonomy information for the species
+        if self.class_names:
+            taxonomy = self.get_taxonomy(self.class_names)
+            self.families = taxonomy[1]  # List of families
+            self.genus_to_family = taxonomy[2]  # Dictionary mapping genus to family
+            self.species_to_genus = taxonomy[3]  # Dictionary mapping species to genus
+            
+            # Create genus list from the dictionary keys
+            self.genera = list(self.genus_to_family.keys())
+            
+            print(f"Extracted {len(self.families)} families and {len(self.genera)} genera")
+        else:
+            self.families = []
+            self.genera = []
+            self.genus_to_family = {}
+            self.species_to_genus = {}
+        
         # Create output directory for saving results
         if self.save_results:
             self.output_dir = os.path.join("output", datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -44,6 +68,87 @@ class SimpleInference:
         
         # Wait a moment for initialization
         time.sleep(1)
+        
+    def get_taxonomy(self, species_list):
+        """
+        Retrieves taxonomic information for a list of species from GBIF API.
+        Creates a hierarchical taxonomy dictionary with family, genus, and species relationships.
+        """
+        taxonomy = {1: [], 2: {}, 3: {}}
+        species_to_genus = {}
+        genus_to_family = {}
+        
+        logger.info(f"Building taxonomy from GBIF for {len(species_list)} species")
+        
+        print("\nTaxonomy Results:")
+        print("-" * 80)
+        print(f"{'Species':<30} {'Family':<20} {'Genus':<20} {'Status'}")
+        print("-" * 80)
+        
+        for species_name in species_list:
+            url = f"https://api.gbif.org/v1/species/match?name={species_name}&verbose=true"
+            try:
+                response = requests.get(url)
+                data = response.json()
+                
+                if data.get('status') == 'ACCEPTED' or data.get('status') == 'SYNONYM':
+                    family = data.get('family')
+                    genus = data.get('genus')
+                    
+                    if family and genus:
+                        status = "OK"
+                        
+                        print(f"{species_name:<30} {family:<20} {genus:<20} {status}")
+                        
+                        species_to_genus[species_name] = genus
+                        genus_to_family[genus] = family
+                        
+                        if family not in taxonomy[1]:
+                            taxonomy[1].append(family)
+                        
+                        taxonomy[2][genus] = family
+                        taxonomy[3][species_name] = genus
+                    else:
+                        error_msg = f"Species '{species_name}' found in GBIF but family and genus not found, could be spelling error in species, check GBIF"
+                        logger.error(error_msg)
+                        print(f"{species_name:<30} {'Not found':<20} {'Not found':<20} ERROR")
+                        print(f"Error: {error_msg}")
+                        sys.exit(1)  # Stop the script
+                else:
+                    error_msg = f"Species '{species_name}' not found in GBIF, could be spelling error, check GBIF"
+                    logger.error(error_msg)
+                    print(f"{species_name:<30} {'Not found':<20} {'Not found':<20} ERROR")
+                    print(f"Error: {error_msg}")
+                    sys.exit(1)  # Stop the script
+                    
+            except Exception as e:
+                error_msg = f"Error retrieving data for species '{species_name}': {str(e)}"
+                logger.error(error_msg)
+                print(f"{species_name:<30} {'Error':<20} {'Error':<20} FAILED")
+                print(f"Error: {error_msg}")
+                sys.exit(1)  # Stop the script
+        
+        taxonomy[1] = sorted(list(set(taxonomy[1])))
+        print("-" * 80)
+        
+        num_families = len(taxonomy[1])
+        num_genera = len(taxonomy[2])
+        num_species = len(taxonomy[3])
+        
+        print("\nFamily indices:")
+        for i, family in enumerate(taxonomy[1]):
+            print(f"  {i}: {family}")
+        
+        print("\nGenus indices:")
+        for i, genus in enumerate(taxonomy[2].keys()):
+            print(f"  {i}: {genus}")
+        
+        print("\nSpecies indices:")
+        for i, species in enumerate(species_list):
+            print(f"  {i}: {species}")
+        
+        logger.info(f"Taxonomy built: {num_families} families, {num_genera} genera, {num_species} species")
+        return taxonomy
         
     def process_frame(self, frame):
         # Get inference results using run_inference
@@ -115,7 +220,7 @@ class SimpleInference:
                             print(f"Shape: {result.shape}")
                             print(f"Results (probabilities): {result}")
                             
-                            # Check if this is the right output stream (shape should be (141,))
+                            # Check if this is the species output stream (shape should be (141,))
                             if result.shape == (141,):
                                 # Get top classes
                                 top_classes = np.argsort(result)[::-1][:5]  # Top 5 classes
@@ -125,10 +230,10 @@ class SimpleInference:
                                 # Get highest probability class
                                 top_class_idx = np.argmax(result)
                                 top_prob = np.max(result)
-                                print(f"Highest probability class: {top_class_idx} with probability: {top_prob:.4f}")
+                                print(f"Highest probability species: {top_class_idx} with probability: {top_prob:.4f}")
                                 
                                 # Get class name if available
-                                class_name = f"Class {top_class_idx}"
+                                class_name = f"Species {top_class_idx}"
                                 if self.class_names and top_class_idx < len(self.class_names):
                                     class_name = self.class_names[top_class_idx]
                                 
@@ -137,6 +242,40 @@ class SimpleInference:
                                 cv2.putText(bgr_frame, label, (x, y2 + 20), 
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                             
+                            # Check if this is the genus output stream (shape should be (114,))
+                            elif result.shape == (114,):
+                                # Get highest probability genus
+                                top_class_idx = np.argmax(result)
+                                top_prob = np.max(result)
+                                print(f"Highest probability genus: {top_class_idx} with probability: {top_prob:.4f}")
+                                
+                                # Get genus name if available
+                                genus_name = f"Genus {top_class_idx}"
+                                if self.genera and top_class_idx < len(self.genera):
+                                    genus_name = self.genera[top_class_idx]
+                                
+                                # Draw genus name and probability on the image
+                                label = f"{genus_name}: {top_prob:.2f}"
+                                cv2.putText(bgr_frame, label, (x, y2 + 40), 
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                            
+                            # Check if this is the family output stream (shape should be (40,))
+                            elif result.shape == (40,):
+                                # Get highest probability family
+                                top_class_idx = np.argmax(result)
+                                top_prob = np.max(result)
+                                print(f"Highest probability family: {top_class_idx} with probability: {top_prob:.4f}")
+                                
+                                # Get family name if available
+                                family_name = f"Family {top_class_idx}"
+                                if self.families and top_class_idx < len(self.families):
+                                    family_name = self.families[top_class_idx]
+                                
+                                # Draw family name and probability on the image
+                                label = f"{family_name}: {top_prob:.2f}"
+                                cv2.putText(bgr_frame, label, (x, y2 + 60), 
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+                    
                     except Exception as e:
                         print(f"Error in classification: {e}")
                         import traceback
