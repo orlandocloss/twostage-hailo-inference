@@ -234,11 +234,13 @@ class InferenceProcessor:
             save_stream_output=False
         )
         
-        print(f"Found {len(infer_results)} raw detections")
+        # Only show detailed debug in real-time mode (when show_boxes=True)
+        if show_boxes:
+            print(f"Found {len(infer_results)} raw detections")
         
         bgr_frame = frame.copy()
         
-        if show_boxes and len(infer_results) > 0:
+        if len(infer_results) > 0:
             height, width = frame.shape[:2]
             valid_detections = 0
             
@@ -249,23 +251,27 @@ class InferenceProcessor:
                 y_min, x_min, y_max, x_max, confidence = detection
                 
                 if confidence < self.confidence_threshold:
-                    print(f"Skipping detection with confidence {confidence:.3f} (threshold: {self.confidence_threshold})")
+                    if show_boxes:  # Only show in real-time mode
+                        print(f"Skipping detection with confidence {confidence:.3f} (threshold: {self.confidence_threshold})")
                     continue
                 
                 valid_detections += 1
-                print(f"Processing detection {valid_detections} with confidence {confidence:.3f}")
+                if show_boxes:  # Only show in real-time mode
+                    print(f"Processing detection {valid_detections} with confidence {confidence:.3f}")
                 
                 x, y = int(x_min * width), int(y_min * height)
                 x2, y2 = int(x_max * width), int(y_max * height)
                 
-                cv2.rectangle(bgr_frame, (x, y), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(bgr_frame, f"{confidence:.2f}", (x, y - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                if show_boxes:
+                    cv2.rectangle(bgr_frame, (x, y), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(bgr_frame, f"{confidence:.2f}", (x, y - 10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                 
                 x, y, x2, y2 = max(0, x), max(0, y), min(width, x2), min(height, y2)
                 
                 if x2 <= x or y2 <= y:
-                    print(f"Invalid crop dimensions: ({x}, {y}, {x2}, {y2})")
+                    if show_boxes:  # Only show in real-time mode
+                        print(f"Invalid crop dimensions: ({x}, {y}, {x2}, {y2})")
                     continue
                 
                 cropped_region = cv2.resize(frame[y:y2, x:x2], (224, 224))
@@ -279,12 +285,21 @@ class InferenceProcessor:
                 }
                 
                 detection_data = self.process_classification_results(classification_results, detection_data)
-                self.draw_classification_labels(bgr_frame, x, y2, detection_data)
+                
+                if show_boxes:
+                    self.draw_classification_labels(bgr_frame, x, y2, detection_data)
                 
                 timestamp = datetime.now().isoformat()
                 self.upload_detection(bgr_frame, detection_data, timestamp)
             
-            print(f"Processed {valid_detections} valid detections (confidence >= {self.confidence_threshold})")
+            # Summary message for directory mode
+            if not show_boxes and valid_detections > 0:
+                print(f"   📊 Found {valid_detections} detection(s) above confidence threshold")
+            elif show_boxes:
+                print(f"Processed {valid_detections} valid detections (confidence >= {self.confidence_threshold})")
+        else:
+            if not show_boxes:
+                print("   📊 No detections found")
         
         return bgr_frame
 
@@ -358,19 +373,23 @@ def run_directory(directory_path):
         print(f"Processing {len(image_files)} images from {directory_path}")
         
         for i, image_path in enumerate(image_files):
+            print(f"\n{'='*60}")
             print(f"Processing {i+1}/{len(image_files)}: {os.path.basename(image_path)}")
+            print(f"{'='*60}")
             
             try:
                 frame = cv2.imread(image_path)
                 if frame is None:
-                    print(f"Failed to load {image_path}")
+                    print(f"❌ Failed to load {image_path}")
                     continue
                 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 processed_frame = processor.process_frame(frame_rgb, show_boxes=False)
                 
+                print(f"✅ Completed processing: {os.path.basename(image_path)}")
+                
             except Exception as e:
-                print(f"Error processing {image_path}: {e}")
+                print(f"❌ Error processing {image_path}: {e}")
         
         # Wait for uploads to complete
         if hasattr(processor, 'upload_queue'):
