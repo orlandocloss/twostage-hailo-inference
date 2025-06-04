@@ -198,7 +198,7 @@ class SimpleInference:
                 genus_confidence=detection_data["genus_confidence"],
                 species_confidence=detection_data["species_confidence"],
                 timestamp=timestamp,
-                bbox=detection_data["bbox"],
+                bounding_box=detection_data["bbox"],
                 track_id=detection_data["track_id"]
             )
             print(f"Successfully uploaded detection to database")
