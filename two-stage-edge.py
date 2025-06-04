@@ -7,6 +7,8 @@ import logging
 import numpy as np
 import argparse
 import glob
+import threading
+import queue
 from datetime import datetime
 from dotenv import load_dotenv
 from pathlib import Path
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 class InferenceProcessor:
     def __init__(self, model_path="small-generic.hef", labels_path="labels.txt", 
                  classification_model="london_141-multitask.hef", class_names_path="london_invertebrates.txt", 
-                 batch_size=1, confidence_threshold=0.35):
+                 batch_size=1, confidence_threshold=0.35, enable_uploads=True):
         
         self.model_path = model_path
         self.labels_path = labels_path
@@ -35,11 +37,18 @@ class InferenceProcessor:
         self.confidence_threshold = confidence_threshold
         self.device_id = "test_edge_images"
         self.model_id = "london_141"
+        self.enable_uploads = enable_uploads
         
         self.class_names = self.load_class_names(class_names_path)
         self.families, self.genera, self.genus_to_family, self.species_to_genus = self.build_taxonomy()
         self.det_utils = ObjectDetectionUtils(labels_path)
-        self.sgc = self.initialize_sensing_garden_client()
+        
+        if self.enable_uploads:
+            self.sgc = self.initialize_sensing_garden_client()
+            self.upload_queue = queue.Queue()
+            self.upload_worker_running = True
+            self.upload_thread = threading.Thread(target=self._upload_worker, daemon=True)
+            self.upload_thread.start()
         
     def load_class_names(self, class_names_path):
         try:
@@ -112,7 +121,25 @@ class InferenceProcessor:
         norm_height = (y2 - y) / height
         return [x_center, y_center, norm_width, norm_height]
     
-    def upload_detection(self, frame, detection_data, timestamp):
+    def _upload_worker(self):
+        """Background worker thread for handling uploads"""
+        while self.upload_worker_running:
+            try:
+                upload_data = self.upload_queue.get(timeout=1)
+                if upload_data is None:  # Shutdown signal
+                    break
+                
+                frame, detection_data, timestamp = upload_data
+                self._perform_upload(frame, detection_data, timestamp)
+                self.upload_queue.task_done()
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Upload worker error: {e}")
+    
+    def _perform_upload(self, frame, detection_data, timestamp):
+        """Perform the actual upload operation"""
         try:
             _, buffer = cv2.imencode('.jpg', frame)
             image_data = buffer.tobytes()
@@ -134,6 +161,25 @@ class InferenceProcessor:
             print("Successfully uploaded detection to database")
         except Exception as e:
             print(f"Error uploading detection: {e}")
+    
+    def shutdown(self):
+        """Shutdown the upload worker thread"""
+        if hasattr(self, 'upload_worker_running'):
+            self.upload_worker_running = False
+            if hasattr(self, 'upload_queue'):
+                self.upload_queue.put(None)  # Signal shutdown
+            if hasattr(self, 'upload_thread'):
+                self.upload_thread.join(timeout=2)
+    
+    def upload_detection(self, frame, detection_data, timestamp):
+        """Queue detection for async upload or upload immediately"""
+        if self.enable_uploads:
+            if hasattr(self, 'upload_queue'):
+                # Async upload via queue
+                self.upload_queue.put((frame.copy(), detection_data, timestamp))
+            else:
+                # Direct upload (fallback)
+                self._perform_upload(frame, detection_data, timestamp)
     
     def process_classification_results(self, classification_results, detection_data):
         for stream_name, result in classification_results.items():
@@ -235,11 +281,12 @@ def initialize_camera():
     return picam2
 
 def run_realtime():
-    processor = InferenceProcessor()
+    # Disable uploads for real-time to avoid frame skipping
+    processor = InferenceProcessor(enable_uploads=False)
     picam2 = initialize_camera()
     
     frame_count = 0
-    print("Starting real-time inference...")
+    print("Starting real-time inference... (uploads disabled for performance)")
     
     try:
         while True:
@@ -259,43 +306,54 @@ def run_realtime():
     except KeyboardInterrupt:
         print("Interrupted by user")
     finally:
+        processor.shutdown()
         cv2.destroyAllWindows()
         picam2.stop()
 
 def run_directory(directory_path):
-    processor = InferenceProcessor()
+    # Enable uploads for directory processing since speed is less critical
+    processor = InferenceProcessor(enable_uploads=True)
     
-    if not os.path.exists(directory_path):
-        print(f"Directory not found: {directory_path}")
-        return
-    
-    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
-    image_files = []
-    
-    for ext in image_extensions:
-        image_files.extend(glob.glob(os.path.join(directory_path, ext)))
-        image_files.extend(glob.glob(os.path.join(directory_path, ext.upper())))
-    
-    if not image_files:
-        print(f"No images found in {directory_path}")
-        return
-    
-    print(f"Processing {len(image_files)} images from {directory_path}")
-    
-    for i, image_path in enumerate(image_files):
-        print(f"Processing {i+1}/{len(image_files)}: {os.path.basename(image_path)}")
+    try:
+        if not os.path.exists(directory_path):
+            print(f"Directory not found: {directory_path}")
+            return
         
-        try:
-            frame = cv2.imread(image_path)
-            if frame is None:
-                print(f"Failed to load {image_path}")
-                continue
+        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
+        image_files = []
+        
+        for ext in image_extensions:
+            image_files.extend(glob.glob(os.path.join(directory_path, ext)))
+            image_files.extend(glob.glob(os.path.join(directory_path, ext.upper())))
+        
+        if not image_files:
+            print(f"No images found in {directory_path}")
+            return
+        
+        print(f"Processing {len(image_files)} images from {directory_path}")
+        
+        for i, image_path in enumerate(image_files):
+            print(f"Processing {i+1}/{len(image_files)}: {os.path.basename(image_path)}")
             
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            processed_frame = processor.process_frame(frame_rgb, show_boxes=False)
+            try:
+                frame = cv2.imread(image_path)
+                if frame is None:
+                    print(f"Failed to load {image_path}")
+                    continue
+                
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                processed_frame = processor.process_frame(frame_rgb, show_boxes=False)
+                
+            except Exception as e:
+                print(f"Error processing {image_path}: {e}")
+        
+        # Wait for uploads to complete
+        if hasattr(processor, 'upload_queue'):
+            print("Waiting for uploads to complete...")
+            processor.upload_queue.join()
             
-        except Exception as e:
-            print(f"Error processing {image_path}: {e}")
+    finally:
+        processor.shutdown()
 
 def main():
     parser = argparse.ArgumentParser(description='Two-stage inference processor')
