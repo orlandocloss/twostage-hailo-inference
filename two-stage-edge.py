@@ -227,52 +227,67 @@ class SimpleInference:
                                 print(f"Top 5 classes: {top_classes}")
                                 print(f"Top 5 probabilities: {result[top_classes]}")
                                 
-                                # Get highest probability class
-                                top_class_idx = np.argmax(result)
-                                top_prob = np.max(result)
-                                print(f"Highest probability species: {top_class_idx} with probability: {top_prob:.4f}")
+                                # Get highest probability and find all classes with equally high probabilities
+                                max_prob = np.max(result)
+                                tolerance = 0.01  # Tolerance for considering probabilities as equal
+                                top_indices = np.where(result >= (max_prob - tolerance))[0]
                                 
-                                # Get class name if available
-                                class_name = f"Species {top_class_idx}"
-                                if self.class_names and top_class_idx < len(self.class_names):
-                                    class_name = self.class_names[top_class_idx]
+                                print(f"Highest probability species indices: {top_indices} with probabilities: {result[top_indices]}")
                                 
-                                # Draw class name and probability on the image
-                                label = f"{class_name}: {top_prob:.2f}"
+                                # Create label with all top species
+                                species_labels = []
+                                for idx in top_indices:
+                                    species_name = f"Species {idx}"
+                                    if self.class_names and idx < len(self.class_names):
+                                        species_name = self.class_names[idx]
+                                    species_labels.append(f"{species_name}({result[idx]:.2f})")
+                                
+                                # Draw species labels on the image
+                                label = " | ".join(species_labels)
                                 cv2.putText(bgr_frame, label, (x, y2 + 20), 
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                             
                             # Check if this is the genus output stream (shape should be (114,))
                             elif result.shape == (114,):
-                                # Get highest probability genus
-                                top_class_idx = np.argmax(result)
-                                top_prob = np.max(result)
-                                print(f"Highest probability genus: {top_class_idx} with probability: {top_prob:.4f}")
+                                # Get highest probability and find all genera with equally high probabilities
+                                max_prob = np.max(result)
+                                tolerance = 0.01  # Tolerance for considering probabilities as equal
+                                top_indices = np.where(result >= (max_prob - tolerance))[0]
                                 
-                                # Get genus name if available
-                                genus_name = f"Genus {top_class_idx}"
-                                if self.genera and top_class_idx < len(self.genera):
-                                    genus_name = self.genera[top_class_idx]
+                                print(f"Highest probability genus indices: {top_indices} with probabilities: {result[top_indices]}")
                                 
-                                # Draw genus name and probability on the image
-                                label = f"{genus_name}: {top_prob:.2f}"
+                                # Create label with all top genera
+                                genus_labels = []
+                                for idx in top_indices:
+                                    genus_name = f"Genus {idx}"
+                                    if self.genera and idx < len(self.genera):
+                                        genus_name = self.genera[idx]
+                                    genus_labels.append(f"{genus_name}({result[idx]:.2f})")
+                                
+                                # Draw genus labels on the image
+                                label = " | ".join(genus_labels)
                                 cv2.putText(bgr_frame, label, (x, y2 + 40), 
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
                             
                             # Check if this is the family output stream (shape should be (40,))
                             elif result.shape == (40,):
-                                # Get highest probability family
-                                top_class_idx = np.argmax(result)
-                                top_prob = np.max(result)
-                                print(f"Highest probability family: {top_class_idx} with probability: {top_prob:.4f}")
+                                # Get highest probability and find all families with equally high probabilities
+                                max_prob = np.max(result)
+                                tolerance = 0.01  # Tolerance for considering probabilities as equal
+                                top_indices = np.where(result >= (max_prob - tolerance))[0]
                                 
-                                # Get family name if available
-                                family_name = f"Family {top_class_idx}"
-                                if self.families and top_class_idx < len(self.families):
-                                    family_name = self.families[top_class_idx]
+                                print(f"Highest probability family indices: {top_indices} with probabilities: {result[top_indices]}")
                                 
-                                # Draw family name and probability on the image
-                                label = f"{family_name}: {top_prob:.2f}"
+                                # Create label with all top families
+                                family_labels = []
+                                for idx in top_indices:
+                                    family_name = f"Family {idx}"
+                                    if self.families and idx < len(self.families):
+                                        family_name = self.families[idx]
+                                    family_labels.append(f"{family_name}({result[idx]:.2f})")
+                                
+                                # Draw family name and probability on the imageSSS
+                                label = " | ".join(family_labels)
                                 cv2.putText(bgr_frame, label, (x, y2 + 60), 
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
                     
