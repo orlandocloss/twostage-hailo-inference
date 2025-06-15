@@ -169,8 +169,22 @@ class InferenceProcessor:
                 continue
             
             try:
-                # The payload is already a complete dictionary of arguments
-                self.sgc.classifications.add(**payload)
+                # Reconstruct the function call EXACTLY as it was in the old working script.
+                # This ensures the argument order and keys are correct.
+                self.sgc.classifications.add(
+                    device_id=payload['device_id'],
+                    model_id=payload['model_id'],
+                    image_data=payload['image_data'],
+                    family=payload.get("family"),
+                    genus=payload.get("genus"),
+                    species=payload.get("species"),
+                    family_confidence=payload.get("family_confidence"),
+                    genus_confidence=payload.get("genus_confidence"),
+                    species_confidence=payload.get("species_confidence"),
+                    timestamp=payload['timestamp'],
+                    bounding_box=payload.get('bbox'), # The key is 'bbox' in storage, argument is 'bounding_box'
+                    track_id=payload.get('track_id')
+                )
                 print(f"  ✓ Successfully uploaded detection: {payload.get('species', 'N/A')}")
                 sys.stdout.flush()
             except Exception as e:
@@ -179,7 +193,7 @@ class InferenceProcessor:
                 print("    Failed Payload Data:")
                 # Create a copy without the bulky image_data for printing
                 debug_payload = payload.copy()
-                debug_payload['image_data'] = f"<... {len(debug_payload['image_data'])} bytes ...>"
+                debug_payload['image_data'] = f"<... {len(debug_payload.get('image_data', b''))} bytes ...>"
                 for key, value in debug_payload.items():
                     print(f"      - {key}: {value}")
                 sys.stdout.flush()
@@ -342,10 +356,11 @@ class InferenceProcessor:
             cropped_region = cv2.resize(frame[y:y2, x:x2], (224, 224))
             classification_results = infer_image(cropped_region, hef_path=self.classification_model)
             
+            # This dictionary uses "bbox" as the key, consistent with the old working script's logic.
             detection_data = {
                 "family": None, "genus": None, "species": None,
                 "family_confidence": None, "genus_confidence": None, "species_confidence": None,
-                "bounding_box": self.convert_bbox_to_normalized(x, y, x2, y2, width, height),
+                "bbox": self.convert_bbox_to_normalized(x, y, x2, y2, width, height),
                 "track_id": track_id
             }
             
