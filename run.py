@@ -38,7 +38,7 @@ class InferenceProcessor:
         self.classification_model = classification_model
         self.batch_size = batch_size
         self.confidence_threshold = confidence_threshold
-        self.device_id = "test_edge_images"
+        self.device_id = "test_pipeline2"
         self.model_id = "london_141"
         self.enable_uploads = enable_uploads
         
@@ -232,11 +232,8 @@ class InferenceProcessor:
             out = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
 
             for frame in video_frames:
-                # VideoWriter expects BGR frames, but picamera2 provides RGB. Convert if necessary.
-                if frame.shape[2] == 3: # Color image
-                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                else: # Grayscale
-                    out.write(frame)
+                # The processed frames are already in BGR format (from process_frame), so write directly
+                out.write(frame)
             out.release()
             print(f"Temporary video saved to {temp_video_path}")
 
@@ -518,6 +515,9 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
             if frame is None or frame.size == 0:
                 continue
 
+            # Process frame first to get the frame with detection boxes (if any)
+            processed_frame = processor.process_frame(frame, show_boxes=display)
+
             # --- Just-in-Time Recording Logic ---
             if enable_sanity_video and recording_start_time != -1:
                 # Check if the current time is within the recording window
@@ -529,14 +529,13 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                     print(f"\n🎬 Starting sanity video recording at {time_into_interval:.2f}s into interval...")
                 
                 if is_recording:
-                    video_frames_buffer.append(frame.copy())
+                    # Use the processed frame (with detection boxes) for the video to match the display
+                    video_frames_buffer.append(processed_frame.copy())
                     if time_into_interval >= recording_end_time:
                         is_recording = False
                         # Mark as done so we don't record again this interval
                         recording_start_time = -1 
                         print(f"🎬 Finished recording. Captured {len(video_frames_buffer)} frames.\n")
-
-            processed_frame = processor.process_frame(frame, show_boxes=display)
 
             if display:
                 cv2.imshow("Real-time Inference", processed_frame)
