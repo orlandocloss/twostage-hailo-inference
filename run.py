@@ -330,7 +330,8 @@ class InferenceProcessor:
         if show_boxes:
             print(f"Found {len(infer_results)} raw detections")
         
-        bgr_frame = frame.copy()
+        # Only create BGR copy if we need to draw on it
+        bgr_frame = frame.copy() if show_boxes else frame
         
         # First pass: collect all valid detections for tracking
         valid_detections = []
@@ -371,17 +372,11 @@ class InferenceProcessor:
                 })
         
         # ALWAYS update tracker with detections (even if empty list)
-        track_ids = []
-        if show_boxes:
-            print(f"Frame {self.frame_count}: Sending {len(valid_detections)} detections to tracker")
-            print(f"Current tracker has {len(self.tracker.current_tracks)} existing tracks")
-        
         track_ids = self.tracker.update(valid_detections, self.frame_count)
         
-        if show_boxes:
-            print(f"Tracker returned IDs: {track_ids}")
-            print(f"Tracker now has {len(self.tracker.current_tracks)} active tracks")
-            print(f"Next track ID will be: {self.tracker.next_track_id}")
+        # Reduced verbose output for performance
+        if show_boxes and len(valid_detections) > 0:
+            print(f"Frame {self.frame_count}: {len(valid_detections)} detections → {len(self.tracker.current_tracks)} active tracks")
         
         # Process each detection with its track ID
         for i, det_data in enumerate(valid_detection_data):
@@ -389,8 +384,7 @@ class InferenceProcessor:
             confidence = det_data['confidence']
             track_id = track_ids[i] if i < len(track_ids) else None
             
-            if show_boxes:  # Only show in real-time mode
-                print(f"Processing detection {i+1} with confidence {confidence:.3f}, track_id: {track_id}")
+            # Removed per-detection verbose output for performance
             
             # Draw bounding box and track ID
             if show_boxes:
@@ -422,13 +416,11 @@ class InferenceProcessor:
             timestamp = datetime.now().isoformat()
             self.store_detection_locally(bgr_frame, detection_data, timestamp)
         
-        # Summary message
+        # Simplified summary message for performance
         if not show_boxes and len(valid_detection_data) > 0:
-            print(f"   📊 Found {len(valid_detection_data)} detection(s) above confidence threshold")
-        elif show_boxes:
-            print(f"Processed {len(valid_detection_data)} valid detections (confidence >= {self.confidence_threshold})")
-        elif not show_boxes:
-            print("   📊 No detections found")
+            print(f"   📊 Found {len(valid_detection_data)} detection(s)")
+        elif not show_boxes and len(valid_detection_data) == 0 and self.frame_count % 30 == 0:
+            print("   📊 No detections (30 frames)")
         
         return bgr_frame
 
@@ -515,10 +507,8 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
             if frame is None or frame.size == 0:
                 continue
 
-            # Process frame first to get the frame with detection boxes (if any)
-            processed_frame = processor.process_frame(frame, show_boxes=display)
-
-            # --- Just-in-Time Recording Logic ---
+            # --- Just-in-Time Recording Logic (check BEFORE processing for efficiency) ---
+            should_record_this_frame = False
             if enable_sanity_video and recording_start_time != -1:
                 # Check if the current time is within the recording window
                 # Time is measured as an offset from the start of the interval
@@ -529,13 +519,19 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                     print(f"\n🎬 Starting sanity video recording at {time_into_interval:.2f}s into interval...")
                 
                 if is_recording:
-                    # Use the processed frame (with detection boxes) for the video to match the display
-                    video_frames_buffer.append(processed_frame.copy())
+                    should_record_this_frame = True
                     if time_into_interval >= recording_end_time:
                         is_recording = False
                         # Mark as done so we don't record again this interval
                         recording_start_time = -1 
                         print(f"🎬 Finished recording. Captured {len(video_frames_buffer)} frames.\n")
+
+            # Process frame (only with full visualization if recording or displaying)
+            processed_frame = processor.process_frame(frame, show_boxes=(display or should_record_this_frame))
+            
+            # Record frame if needed
+            if should_record_this_frame:
+                video_frames_buffer.append(processed_frame.copy())
 
             if display:
                 cv2.imshow("Real-time Inference", processed_frame)
