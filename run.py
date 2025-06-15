@@ -487,10 +487,13 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                 print(f"\n--- Upload interval of {upload_interval}s reached. Pausing detections to upload batch. ---")
                 processor.upload_local_batch()
                 if enable_sanity_video and video_frames_buffer:
-                    # Estimate FPS from the number of frames recorded and the clip duration
+                    # Use a fixed FPS for smooth playback regardless of processing speed
+                    # This makes the video play at normal speed even if processing was slow
+                    target_fps = 15  # Smooth playback speed
                     actual_clip_duration = recording_end_time - recording_start_time
-                    estimated_fps = len(video_frames_buffer) / actual_clip_duration if actual_clip_duration > 0 else 10
-                    processor.create_and_upload_sanity_video(video_frames_buffer, fps=estimated_fps)
+                    actual_processing_fps = len(video_frames_buffer) / actual_clip_duration if actual_clip_duration > 0 else 0
+                    print(f"📹 Video stats: {len(video_frames_buffer)} frames over {actual_clip_duration:.1f}s (processed at {actual_processing_fps:.1f} FPS, playing at {target_fps} FPS)")
+                    processor.create_and_upload_sanity_video(video_frames_buffer, fps=target_fps)
                 
                 # Clear buffers and schedule the next cycle
                 video_frames_buffer.clear()
