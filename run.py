@@ -125,14 +125,30 @@ class InferenceProcessor:
         return [x_center, y_center, norm_width, norm_height]
     
     def store_detection_locally(self, frame, detection_data, timestamp):
-        """Store detection data locally for batch uploading."""
-        if self.enable_uploads:
-            # Store a copy of the frame to avoid issues with it being modified later
-            self.local_detections.append((frame.copy(), detection_data, timestamp))
-            print(f"💿 Locally stored detection: {detection_data.get('species', 'N/A')} (total stored: {len(self.local_detections)})")
-        else:
+        """Encodes the image and stores the complete upload payload locally."""
+        if not self.enable_uploads:
             print(f"📷 Detected (uploads disabled): {detection_data.get('species', 'N/A')}")
-        sys.stdout.flush()
+            sys.stdout.flush()
+            return
+
+        try:
+            _, buffer = cv2.imencode('.jpg', frame)
+            image_data = buffer.tobytes()
+
+            payload = {
+                "device_id": self.device_id,
+                "model_id": self.model_id,
+                "image_data": image_data,
+                "timestamp": timestamp,
+                **detection_data  # Unpacks family, genus, species, confidences, bbox, track_id
+            }
+
+            self.local_detections.append(payload)
+            print(f"💿 Locally stored detection: {payload.get('species', 'N/A')} (total stored: {len(self.local_detections)})")
+            sys.stdout.flush()
+
+        except Exception as e:
+            print(f"Error storing detection locally: {e}")
 
     def upload_local_batch(self):
         """Uploads all locally stored detections and clears the list on success."""
@@ -145,44 +161,29 @@ class InferenceProcessor:
         
         failed_detections = []
         
-        for detection_tuple in self.local_detections:
-            frame, detection_data, timestamp = detection_tuple
-            
+        for payload in self.local_detections:
             # --- VALIDATION STEP ---
-            # Ensure at least one classification was successful before trying to upload.
-            if not any([detection_data.get("family"), detection_data.get("genus"), detection_data.get("species")]):
-                print(f"  ✗ Skipping upload for detection at {timestamp}: No valid classification found.")
-                failed_detections.append(detection_tuple) # Keep it for potential later processing or inspection
+            if not any([payload.get("family"), payload.get("genus"), payload.get("species")]):
+                print(f"  ✗ Skipping upload for detection at {payload['timestamp']}: No valid classification found.")
+                failed_detections.append(payload)
                 continue
             
             try:
-                _, buffer = cv2.imencode('.jpg', frame)
-                image_data = buffer.tobytes()
-                
-                self.sgc.classifications.add(
-                    device_id=self.device_id,
-                    model_id=self.model_id,
-                    image_data=image_data,
-                    family=detection_data["family"],
-                    genus=detection_data["genus"],
-                    species=detection_data["species"],
-                    family_confidence=detection_data["family_confidence"],
-                    genus_confidence=detection_data["genus_confidence"],
-                    species_confidence=detection_data["species_confidence"],
-                    timestamp=timestamp,
-                    bounding_box=detection_data["bbox"],
-                    track_id=detection_data["track_id"]
-                )
-                print(f"  ✓ Successfully uploaded detection: {detection_data.get('species', 'N/A')}")
+                # The payload is already a complete dictionary of arguments
+                self.sgc.classifications.add(**payload)
+                print(f"  ✓ Successfully uploaded detection: {payload.get('species', 'N/A')}")
                 sys.stdout.flush()
             except Exception as e:
                 print(f"  ✗ Error uploading detection: {e}")
                 # --- ENHANCED DEBUGGING ---
                 print("    Failed Payload Data:")
-                for key, value in detection_data.items():
+                # Create a copy without the bulky image_data for printing
+                debug_payload = payload.copy()
+                debug_payload['image_data'] = f"<... {len(debug_payload['image_data'])} bytes ...>"
+                for key, value in debug_payload.items():
                     print(f"      - {key}: {value}")
                 sys.stdout.flush()
-                failed_detections.append(detection_tuple)
+                failed_detections.append(payload)
                 
         success_count = len(self.local_detections) - len(failed_detections)
         fail_count = len(failed_detections)
