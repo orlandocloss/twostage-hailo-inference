@@ -147,6 +147,14 @@ class InferenceProcessor:
         
         for detection_tuple in self.local_detections:
             frame, detection_data, timestamp = detection_tuple
+            
+            # --- VALIDATION STEP ---
+            # Ensure at least one classification was successful before trying to upload.
+            if not any([detection_data.get("family"), detection_data.get("genus"), detection_data.get("species")]):
+                print(f"  ✗ Skipping upload for detection at {timestamp}: No valid classification found.")
+                failed_detections.append(detection_tuple) # Keep it for potential later processing or inspection
+                continue
+            
             try:
                 _, buffer = cv2.imencode('.jpg', frame)
                 image_data = buffer.tobytes()
@@ -169,6 +177,10 @@ class InferenceProcessor:
                 sys.stdout.flush()
             except Exception as e:
                 print(f"  ✗ Error uploading detection: {e}")
+                # --- ENHANCED DEBUGGING ---
+                print("    Failed Payload Data:")
+                for key, value in detection_data.items():
+                    print(f"      - {key}: {value}")
                 sys.stdout.flush()
                 failed_detections.append(detection_tuple)
                 
@@ -419,7 +431,7 @@ def main():
                        help='Enable database uploads. Disabled by default for performance.')
     parser.add_argument('--headless', action='store_false', dest='display',
                        help='Run in headless mode without displaying the video feed.')
-    parser.add_argument('--upload-interval', type=int, default=30,
+    parser.add_argument('--upload-interval', type=int, default=60,
                         help='The interval in seconds for batch uploading detections.')
     
     args = parser.parse_args()
