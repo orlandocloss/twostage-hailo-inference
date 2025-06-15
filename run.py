@@ -183,9 +183,10 @@ class InferenceProcessor:
                     genus_confidence=payload.get("genus_confidence"),
                     species_confidence=payload.get("species_confidence"),
                     timestamp=payload['timestamp'],
-                    # Convert the list to a JSON string to ensure robust transport.
-                    bounding_box=json.dumps(payload.get('bbox')), 
-                    track_id=payload.get('track_id')
+                    # The key is 'bbox' in storage, argument is 'bounding_box'. Send as a raw list.
+                    bounding_box=payload.get('bbox'), 
+                    # Ensure track_id is a float to match the working example.
+                    track_id=float(payload['track_id']) if payload.get('track_id') is not None else None
                 )
                 print(f"  ✓ Successfully uploaded detection: {payload.get('species', 'N/A')}")
                 sys.stdout.flush()
