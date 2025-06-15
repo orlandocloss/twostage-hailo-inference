@@ -31,10 +31,19 @@ twostage-hailo-inference/
 
 ```bash
 # Real-time inference WITHOUT database uploads (recommended for performance)
-python3 run.py --realtime
+python3 run.py
 
-# Real-time inference WITH database uploads (may cause frame skipping)
-python3 run.py --realtime --enable-uploads
+# Real-time inference WITH database uploads
+python3 run.py --enable-uploads
+
+# Run in headless mode (no display window)
+python3 run.py --headless
+
+# Custom device ID for uploads
+python3 run.py --enable-uploads --device-id "my_device_001"
+
+# Enable sanity video recording (10% of upload interval)
+python3 run.py --enable-uploads --sanity-video-percent 10
 ```
 
 **What it does:**
@@ -47,21 +56,19 @@ python3 run.py --realtime --enable-uploads
 - **Default**: Database uploads are **DISABLED** for better performance
 - **With `--enable-uploads`**: Database uploads are **ENABLED** but may cause frame drops due to network delays
 
-### Directory Processing (Batch Mode)
+### Command Line Options
 
 ```bash
-# Process all images in a directory
-python3 run.py --directory /path/to/images/
+# Show all available options
+python3 run.py --help
 ```
 
-**What it does:**
-- Processes all images (*.jpg, *.jpeg, *.png, *.bmp) in the specified directory
-- Performs detection and classification on each image
-- Provides detailed progress output for each image
-- Waits for all uploads to complete before finishing
-
-**Upload behavior:**
-- Database uploads are **ALWAYS ENABLED** in directory mode (speed is less critical for batch processing)
+**Available Arguments:**
+- `--enable-uploads`: Enable database uploads (disabled by default for performance)
+- `--headless`: Run without display window (useful for remote deployment)
+- `--upload-interval N`: Set upload interval in seconds (default: 60)
+- `--sanity-video-percent N`: Record sanity videos for N% of upload interval (default: 0, disabled)
+- `--device-id "ID"`: Set custom device identifier for uploads (default: "test_pipeline2")
 
 ### Help
 
@@ -102,11 +109,16 @@ AWS_REGION=us-east-1
 
 ### 3. Device and Model Configuration
 
-The system uses hardcoded device and model identifiers for database uploads. To customize these, edit the following lines in `run.py`:
+**Device ID**: Use the `--device-id` command line argument to set your device identifier:
+
+```bash
+python3 run.py --enable-uploads --device-id "my_edge_device_001"
+```
+
+**Model ID**: The system uses a hardcoded model identifier. To customize it, edit this line in `run.py`:
 
 ```python
-# In the InferenceProcessor.__init__ method (around line 38-39)
-self.device_id = "test_edge_images"  # Change this to your device identifier
+# In the InferenceProcessor.__init__ method (around line 39)
 self.model_id = "london_141"         # Change this to your model identifier
 ```
 
