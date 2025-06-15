@@ -345,7 +345,7 @@ class InferenceProcessor:
             detection_data = {
                 "family": None, "genus": None, "species": None,
                 "family_confidence": None, "genus_confidence": None, "species_confidence": None,
-                "bbox": self.convert_bbox_to_normalized(x, y, x2, y2, width, height),
+                "bounding_box": self.convert_bbox_to_normalized(x, y, x2, y2, width, height),
                 "track_id": track_id
             }
             
