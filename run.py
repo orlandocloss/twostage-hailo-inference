@@ -19,6 +19,7 @@ from models.detection import run_inference
 from models.classification import infer_image
 from models.insect_tracker import InsectTracker
 from sensing_garden_client import SensingGardenClient
+import tempfile
 
 # Load environment variables from .env file
 load_dotenv()
@@ -37,7 +38,7 @@ class InferenceProcessor:
         self.classification_model = classification_model
         self.batch_size = batch_size
         self.confidence_threshold = confidence_threshold
-        self.device_id = "test_new_pipeline"
+        self.device_id = "test_edge_images"
         self.model_id = "london_141"
         self.enable_uploads = enable_uploads
         
@@ -209,12 +210,66 @@ class InferenceProcessor:
             print("All uploads successful. Clearing local detection cache.")
             self.local_detections.clear()
 
+    def create_and_upload_sanity_video(self, video_frames, fps=15):
+        """Creates a video from a list of frames and uploads it."""
+        if not self.enable_uploads or not video_frames:
+            print("Sanity video creation skipped: No frames provided or uploads disabled.")
+            return
+
+        print(f"\n--- 🎬 Starting sanity video creation from {len(video_frames)} frames ---")
+        
+        # Get frame dimensions from the first frame
+        height, width, _ = video_frames[0].shape
+        
+        temp_video_path = None
+        try:
+            # Create a temporary file to write the video to
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_video:
+                temp_video_path = temp_video.name
+
+            # Define the codec and create VideoWriter object
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
+            out = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
+
+            for frame in video_frames:
+                # VideoWriter expects BGR frames, but picamera2 provides RGB. Convert if necessary.
+                if frame.shape[2] == 3: # Color image
+                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                else: # Grayscale
+                    out.write(frame)
+            out.release()
+            print(f"Temporary video saved to {temp_video_path}")
+
+            # Read the video data for upload
+            with open(temp_video_path, "rb") as f:
+                video_data = f.read()
+
+            # Upload the video
+            print("Uploading sanity video...")
+            self.sgc.videos.upload_video(
+                device_id=self.device_id,
+                timestamp=datetime.now().isoformat(),
+                video_path_or_data=video_data,
+                content_type="video/mp4"
+            )
+            print("  ✓ Sanity video uploaded successfully.")
+
+        except Exception as e:
+            print(f"  ✗ Error creating or uploading sanity video: {e}")
+        finally:
+            # Clean up the temporary file
+            if temp_video_path and os.path.exists(temp_video_path):
+                os.unlink(temp_video_path)
+                print(f"Temporary video file {temp_video_path} deleted.")
+        print("--- 🎬 Sanity video process complete ---")
+
     def shutdown(self):
         """Shutdown the processor, uploading any remaining detections."""
         print("\nShutting down processor...")
         if self.enable_uploads and self.local_detections:
             print("Uploading remaining detections before exit...")
             self.upload_local_batch()
+            # Note: A final sanity video is not created on shutdown to keep it simple.
         print("Shutdown complete.")
     
     def process_classification_results(self, classification_results, detection_data):
@@ -389,46 +444,104 @@ def initialize_camera():
     time.sleep(1)
     return picam2
 
-def run_realtime(enable_uploads=False, display=True, upload_interval=60):
+def run_realtime(enable_uploads=False, display=True, upload_interval=60, 
+                 sanity_video_percent=0):
+    
+    # The feature is enabled if the user provides a percentage greater than 0.
+    enable_sanity_video = sanity_video_percent > 0
+
     processor = InferenceProcessor(enable_uploads=enable_uploads)
     picam2 = initialize_camera()
     
-    frame_count = 0
+    # --- State variables for the main loop ---
     last_upload_time = time.time()
-    print("Starting real-time inference...")
     
-    if enable_uploads:
-        print(f"Database uploads are ENABLED. Batch uploads will occur every {upload_interval} seconds.")
-    else:
-        print("NOTE: Database uploads are DISABLED. Use --enable-uploads to enable them.")
+    # Variables for just-in-time video recording
+    is_recording = False
+    video_frames_buffer = []
+    recording_start_time = -1
+    recording_end_time = -1
 
-    if not display:
-        print("Display is DISABLED (headless mode).")
-    
+    def schedule_next_recording():
+        """Determines the time window for the next sanity video."""
+        nonlocal recording_start_time, recording_end_time
+        
+        # Calculate the duration of the video clip in seconds
+        clip_duration = upload_interval * (sanity_video_percent / 100.0)
+        
+        if clip_duration < 1:
+            recording_start_time = -1 # No recording this interval
+            print("Interval too short or percentage too low to schedule a video.")
+            return
+
+        # Randomly choose a start time for the clip within the next interval
+        # The start time is an offset from the beginning of the interval
+        max_start_offset = upload_interval - clip_duration
+        start_offset = np.random.uniform(0, max_start_offset)
+        
+        # These are relative to the 'last_upload_time' which marks the start of the interval
+        recording_start_time = start_offset
+        recording_end_time = start_offset + clip_duration
+        print(f"Next sanity video scheduled: {clip_duration:.2f}s clip, starting at ~{start_offset:.2f}s into the next interval.")
+
+    # Schedule the first recording session
+    if enable_sanity_video:
+        schedule_next_recording()
+
     try:
         while True:
-            # Check for batch upload period
-            if enable_uploads and (time.time() - last_upload_time >= upload_interval):
+            current_time = time.time()
+            time_since_last_upload = current_time - last_upload_time
+
+            # --- Batch Upload Logic ---
+            if enable_uploads and (time_since_last_upload >= upload_interval):
                 print(f"\n--- Upload interval of {upload_interval}s reached. Pausing detections to upload batch. ---")
                 processor.upload_local_batch()
-                last_upload_time = time.time()
+                if enable_sanity_video and video_frames_buffer:
+                    # Estimate FPS from the number of frames recorded and the clip duration
+                    actual_clip_duration = recording_end_time - recording_start_time
+                    estimated_fps = len(video_frames_buffer) / actual_clip_duration if actual_clip_duration > 0 else 10
+                    processor.create_and_upload_sanity_video(video_frames_buffer, fps=estimated_fps)
+                
+                # Clear buffers and schedule the next cycle
+                video_frames_buffer.clear()
+                is_recording = False
+                if enable_sanity_video:
+                    schedule_next_recording()
+
                 print("--- Resuming detections. ---")
+                last_upload_time = time.time()
+                processor.frame_count = 0
 
             frame = picam2.capture_array()
             
             if frame is None or frame.size == 0:
                 continue
-            
+
+            # --- Just-in-Time Recording Logic ---
+            if enable_sanity_video and recording_start_time != -1:
+                # Check if the current time is within the recording window
+                # Time is measured as an offset from the start of the interval
+                time_into_interval = current_time - last_upload_time
+                
+                if not is_recording and time_into_interval >= recording_start_time:
+                    is_recording = True
+                    print(f"\n🎬 Starting sanity video recording at {time_into_interval:.2f}s into interval...")
+                
+                if is_recording:
+                    video_frames_buffer.append(frame.copy())
+                    if time_into_interval >= recording_end_time:
+                        is_recording = False
+                        # Mark as done so we don't record again this interval
+                        recording_start_time = -1 
+                        print(f"🎬 Finished recording. Captured {len(video_frames_buffer)} frames.\n")
+
             processed_frame = processor.process_frame(frame, show_boxes=display)
 
             if display:
                 cv2.imshow("Real-time Inference", processed_frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
-            
-            frame_count += 1
-            if frame_count % 100 == 0:
-                print(f"Processed {frame_count} frames...")
             
     except KeyboardInterrupt:
         print("Interrupted by user")
@@ -447,10 +560,17 @@ def main():
                        help='Run in headless mode without displaying the video feed.')
     parser.add_argument('--upload-interval', type=int, default=60,
                         help='The interval in seconds for batch uploading detections.')
+    parser.add_argument('--sanity-video-percent', type=int, default=0,
+                        help='Enables sanity video. Set to a percentage of interval time (e.g., 10). Default: 0 (disabled).')
     
     args = parser.parse_args()
     
-    run_realtime(enable_uploads=args.enable_uploads, display=args.display, upload_interval=args.upload_interval)
+    run_realtime(
+        enable_uploads=args.enable_uploads, 
+        display=args.display, 
+        upload_interval=args.upload_interval,
+        sanity_video_percent=args.sanity_video_percent
+    )
 
 if __name__ == "__main__":
     main()
