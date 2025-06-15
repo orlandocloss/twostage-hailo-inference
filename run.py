@@ -31,14 +31,14 @@ logger = logging.getLogger(__name__)
 class InferenceProcessor:
     def __init__(self, model_path="weights/small-generic.hef", labels_path="data/labels.txt", 
                  classification_model="weights/london_141-multitask.hef", class_names_path="data/london_invertebrates.txt", 
-                 batch_size=1, confidence_threshold=0.35, enable_uploads=True):
+                 batch_size=1, confidence_threshold=0.35, enable_uploads=True, device_id="test_pipeline2"):
         
         self.model_path = model_path
         self.labels_path = labels_path
         self.classification_model = classification_model
         self.batch_size = batch_size
         self.confidence_threshold = confidence_threshold
-        self.device_id = "test_pipeline2"
+        self.device_id = device_id
         self.model_id = "london_141"
         self.enable_uploads = enable_uploads
         
@@ -434,12 +434,12 @@ def initialize_camera():
     return picam2
 
 def run_realtime(enable_uploads=False, display=True, upload_interval=60, 
-                 sanity_video_percent=0):
+                 sanity_video_percent=0, device_id="test_pipeline2"):
     
     # The feature is enabled if the user provides a percentage greater than 0.
     enable_sanity_video = sanity_video_percent > 0
 
-    processor = InferenceProcessor(enable_uploads=enable_uploads)
+    processor = InferenceProcessor(enable_uploads=enable_uploads, device_id=device_id)
     picam2 = initialize_camera()
     
     # --- State variables for the main loop ---
@@ -568,6 +568,8 @@ def main():
                         help='The interval in seconds for batch uploading detections.')
     parser.add_argument('--sanity-video-percent', type=int, default=0,
                         help='Enables sanity video. Set to a percentage of interval time (e.g., 10). Default: 0 (disabled).')
+    parser.add_argument('--device-id', type=str, default='test_pipeline2',
+                        help='Device ID for uploads and identification. Default: test_pipeline2')
     
     args = parser.parse_args()
     
@@ -575,7 +577,8 @@ def main():
         enable_uploads=args.enable_uploads, 
         display=args.display, 
         upload_interval=args.upload_interval,
-        sanity_video_percent=args.sanity_video_percent
+        sanity_video_percent=args.sanity_video_percent,
+        device_id=args.device_id
     )
 
 if __name__ == "__main__":
