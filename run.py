@@ -36,9 +36,11 @@ class InferenceProcessor:
         self.classification_model = classification_model
         self.batch_size = batch_size
         self.confidence_threshold = confidence_threshold
-        self.device_id = "test_edge_images"
+        self.device_id = "test_new_pipeline"
         self.model_id = "london_141"
         self.enable_uploads = enable_uploads
+        
+        self.local_detections = []
         
         # Initialize tracker (will be set up when we know frame dimensions)
         self.tracker = None
@@ -50,10 +52,6 @@ class InferenceProcessor:
         
         if self.enable_uploads:
             self.sgc = self.initialize_sensing_garden_client()
-            self.upload_queue = queue.Queue()
-            self.upload_worker_running = True
-            self.upload_thread = threading.Thread(target=self._upload_worker, daemon=True)
-            self.upload_thread.start()
         
     def load_class_names(self, class_names_path):
         try:
@@ -126,72 +124,73 @@ class InferenceProcessor:
         norm_height = (y2 - y) / height
         return [x_center, y_center, norm_width, norm_height]
     
-    def _upload_worker(self):
-        """Background worker thread for handling uploads"""
-        while self.upload_worker_running:
-            try:
-                upload_data = self.upload_queue.get(timeout=1)
-                if upload_data is None:  # Shutdown signal
-                    break
-                
-                frame, detection_data, timestamp = upload_data
-                self._perform_upload(frame, detection_data, timestamp)
-                self.upload_queue.task_done()
-                
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"Upload worker error: {e}")
-    
-    def _perform_upload(self, frame, detection_data, timestamp):
-        """Perform the actual upload operation"""
-        try:
-            _, buffer = cv2.imencode('.jpg', frame)
-            image_data = buffer.tobytes()
-            
-            self.sgc.classifications.add(
-                device_id=self.device_id,
-                model_id=self.model_id,
-                image_data=image_data,
-                family=detection_data["family"],
-                genus=detection_data["genus"],
-                species=detection_data["species"],
-                family_confidence=detection_data["family_confidence"],
-                genus_confidence=detection_data["genus_confidence"],
-                species_confidence=detection_data["species_confidence"],
-                timestamp=timestamp,
-                bounding_box=detection_data["bbox"],
-                track_id=detection_data["track_id"]
-            )
-            print(f"✓ Successfully uploaded detection: {detection_data['species']}")
-            sys.stdout.flush()  # Ensure message is visible immediately
-        except Exception as e:
-            print(f"✗ Error uploading detection: {e}")
-            sys.stdout.flush()
-    
-    def shutdown(self):
-        """Shutdown the upload worker thread"""
-        if hasattr(self, 'upload_worker_running'):
-            self.upload_worker_running = False
-            if hasattr(self, 'upload_queue'):
-                self.upload_queue.put(None)  # Signal shutdown
-            if hasattr(self, 'upload_thread'):
-                self.upload_thread.join(timeout=2)
-    
-    def upload_detection(self, frame, detection_data, timestamp):
-        """Queue detection for async upload or upload immediately"""
+    def store_detection_locally(self, frame, detection_data, timestamp):
+        """Store detection data locally for batch uploading."""
         if self.enable_uploads:
-            print(f"→ Queueing detection for upload: {detection_data['species']}")
-            sys.stdout.flush()
-            if hasattr(self, 'upload_queue'):
-                # Async upload via queue
-                self.upload_queue.put((frame.copy(), detection_data, timestamp))
-            else:
-                # Direct upload (fallback)
-                self._perform_upload(frame, detection_data, timestamp)
+            # Store a copy of the frame to avoid issues with it being modified later
+            self.local_detections.append((frame.copy(), detection_data, timestamp))
+            print(f"💿 Locally stored detection: {detection_data.get('species', 'N/A')} (total stored: {len(self.local_detections)})")
         else:
-            print(f"📷 Detected (upload disabled): {detection_data['species']}")
-            sys.stdout.flush()
+            print(f"📷 Detected (uploads disabled): {detection_data.get('species', 'N/A')}")
+        sys.stdout.flush()
+
+    def upload_local_batch(self):
+        """Uploads all locally stored detections and clears the list on success."""
+        if not self.enable_uploads or not self.local_detections:
+            if self.enable_uploads:
+                print("No local detections to upload.")
+            return
+
+        print(f"\n--- ☁️ Starting batch upload of {len(self.local_detections)} detections ---")
+        
+        failed_detections = []
+        
+        for detection_tuple in self.local_detections:
+            frame, detection_data, timestamp = detection_tuple
+            try:
+                _, buffer = cv2.imencode('.jpg', frame)
+                image_data = buffer.tobytes()
+                
+                self.sgc.classifications.add(
+                    device_id=self.device_id,
+                    model_id=self.model_id,
+                    image_data=image_data,
+                    family=detection_data["family"],
+                    genus=detection_data["genus"],
+                    species=detection_data["species"],
+                    family_confidence=detection_data["family_confidence"],
+                    genus_confidence=detection_data["genus_confidence"],
+                    species_confidence=detection_data["species_confidence"],
+                    timestamp=timestamp,
+                    bounding_box=detection_data["bbox"],
+                    track_id=detection_data["track_id"]
+                )
+                print(f"  ✓ Successfully uploaded detection: {detection_data.get('species', 'N/A')}")
+                sys.stdout.flush()
+            except Exception as e:
+                print(f"  ✗ Error uploading detection: {e}")
+                sys.stdout.flush()
+                failed_detections.append(detection_tuple)
+                
+        success_count = len(self.local_detections) - len(failed_detections)
+        fail_count = len(failed_detections)
+        
+        print(f"--- ☁️ Batch upload complete. {success_count} successful, {fail_count} failed. ---\n")
+        
+        if fail_count > 0:
+            print(f"WARNING: {fail_count} uploads failed. Retrying them in the next batch.")
+            self.local_detections = failed_detections
+        else:
+            print("All uploads successful. Clearing local detection cache.")
+            self.local_detections.clear()
+
+    def shutdown(self):
+        """Shutdown the processor, uploading any remaining detections."""
+        print("\nShutting down processor...")
+        if self.enable_uploads and self.local_detections:
+            print("Uploading remaining detections before exit...")
+            self.upload_local_batch()
+        print("Shutdown complete.")
     
     def process_classification_results(self, classification_results, detection_data):
         for stream_name, result in classification_results.items():
@@ -343,7 +342,7 @@ class InferenceProcessor:
                 self.draw_classification_labels(bgr_frame, x, y2, detection_data)
             
             timestamp = datetime.now().isoformat()
-            self.upload_detection(bgr_frame, detection_data, timestamp)
+            self.store_detection_locally(bgr_frame, detection_data, timestamp)
         
         # Summary message
         if not show_boxes and len(valid_detection_data) > 0:
@@ -364,108 +363,68 @@ def initialize_camera():
     time.sleep(1)
     return picam2
 
-def run_realtime(enable_uploads=False):
+def run_realtime(enable_uploads=False, display=True, upload_interval=60):
     processor = InferenceProcessor(enable_uploads=enable_uploads)
     picam2 = initialize_camera()
     
     frame_count = 0
+    last_upload_time = time.time()
     print("Starting real-time inference...")
     
     if enable_uploads:
-        print("Database uploads are ENABLED in real-time mode")
-        print("WARNING: This may cause frame skipping due to network delays")
+        print(f"Database uploads are ENABLED. Batch uploads will occur every {upload_interval} seconds.")
     else:
-        print("NOTE: Database uploads are DISABLED in real-time mode for better performance")
-        print("Use --enable-uploads flag to enable uploads or --directory mode for batch processing")
+        print("NOTE: Database uploads are DISABLED. Use --enable-uploads to enable them.")
+
+    if not display:
+        print("Display is DISABLED (headless mode).")
     
     try:
         while True:
+            # Check for batch upload period
+            if enable_uploads and (time.time() - last_upload_time >= upload_interval):
+                print(f"\n--- Upload interval of {upload_interval}s reached. Pausing detections to upload batch. ---")
+                processor.upload_local_batch()
+                last_upload_time = time.time()
+                print("--- Resuming detections. ---")
+
             frame = picam2.capture_array()
             
             if frame is None or frame.size == 0:
                 continue
             
-            processed_frame = processor.process_frame(frame)
-            cv2.imshow("Real-time Inference", processed_frame)
+            processed_frame = processor.process_frame(frame, show_boxes=display)
+
+            if display:
+                cv2.imshow("Real-time Inference", processed_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
             
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-                
             frame_count += 1
+            if frame_count % 100 == 0:
+                print(f"Processed {frame_count} frames...")
             
     except KeyboardInterrupt:
         print("Interrupted by user")
     finally:
         processor.shutdown()
-        cv2.destroyAllWindows()
+        if display:
+            cv2.destroyAllWindows()
         picam2.stop()
 
-def run_directory(directory_path):
-    # Enable uploads for directory processing since speed is less critical
-    processor = InferenceProcessor(enable_uploads=True)
-    
-    print("Directory mode: Database uploads are ENABLED")
-    
-    try:
-        if not os.path.exists(directory_path):
-            print(f"Directory not found: {directory_path}")
-            return
-        
-        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp']
-        image_files = []
-        
-        for ext in image_extensions:
-            image_files.extend(glob.glob(os.path.join(directory_path, ext)))
-            image_files.extend(glob.glob(os.path.join(directory_path, ext.upper())))
-        
-        if not image_files:
-            print(f"No images found in {directory_path}")
-            return
-        
-        print(f"Processing {len(image_files)} images from {directory_path}")
-        
-        for i, image_path in enumerate(image_files):
-            print(f"\n{'='*60}")
-            print(f"Processing {i+1}/{len(image_files)}: {os.path.basename(image_path)}")
-            print(f"{'='*60}")
-            
-            try:
-                frame = cv2.imread(image_path)
-                if frame is None:
-                    print(f"❌ Failed to load {image_path}")
-                    continue
-                
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                processed_frame = processor.process_frame(frame_rgb, show_boxes=False)
-                
-                print(f"✅ Completed processing: {os.path.basename(image_path)}")
-                
-            except Exception as e:
-                print(f"❌ Error processing {image_path}: {e}")
-        
-        # Wait for uploads to complete
-        if hasattr(processor, 'upload_queue'):
-            print("Waiting for uploads to complete...")
-            processor.upload_queue.join()
-            
-    finally:
-        processor.shutdown()
-
 def main():
-    parser = argparse.ArgumentParser(description='Two-stage inference processor')
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--realtime', action='store_true', help='Run real-time inference from camera')
-    group.add_argument('--directory', type=str, help='Process images from directory')
+    parser = argparse.ArgumentParser(description='Real-time two-stage inference processor for insect tracking.')
     
     parser.add_argument('--enable-uploads', action='store_true', 
-                       help='Enable database uploads in real-time mode (may cause frame skipping)')
+                       help='Enable database uploads. Disabled by default for performance.')
+    parser.add_argument('--headless', action='store_false', dest='display',
+                       help='Run in headless mode without displaying the video feed.')
+    parser.add_argument('--upload-interval', type=int, default=30,
+                        help='The interval in seconds for batch uploading detections.')
     
     args = parser.parse_args()
     
-    if args.realtime:
-        run_realtime(args.enable_uploads)
-    elif args.directory:
-        run_directory(args.directory)
+    run_realtime(enable_uploads=args.enable_uploads, display=args.display, upload_interval=args.upload_interval)
 
 if __name__ == "__main__":
     main()

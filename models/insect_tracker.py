@@ -223,7 +223,7 @@ class InsectTracker:
         # Add to tracking history
         self.tracking_history.append(new_boxes)
         
-        return track_ids
+        return track_ids 
     
     def _age_lost_tracks(self):
         """Age lost tracks and remove those that have been lost too long"""
