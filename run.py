@@ -163,12 +163,7 @@ class InferenceProcessor:
         failed_detections = []
         
         for payload in self.local_detections:
-            # --- VALIDATION STEP ---
-            if not any([payload.get("family"), payload.get("genus"), payload.get("species")]):
-                print(f"  ✗ Skipping upload for detection at {payload['timestamp']}: No valid classification found.")
-                failed_detections.append(payload)
-                continue
-            
+           
             try:
                 # Reconstruct the function call EXACTLY as it was in the old working script.
                 # This ensures the argument order and keys are correct.
@@ -185,8 +180,8 @@ class InferenceProcessor:
                     timestamp=payload['timestamp'],
                     # The key is 'bbox' in storage, argument is 'bounding_box'. Send as a raw list.
                     bounding_box=payload.get('bbox'), 
-                    # Ensure track_id is a float to match the working example.
-                    track_id=float(payload['track_id']) if payload.get('track_id') is not None else None
+                    # CRITICAL FIX: The API requires the track_id to be a string.
+                    track_id=str(payload['track_id']) 
                 )
                 print(f"  ✓ Successfully uploaded detection: {payload.get('species', 'N/A')}")
                 sys.stdout.flush()
