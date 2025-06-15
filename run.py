@@ -9,6 +9,7 @@ import argparse
 import glob
 import threading
 import queue
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 from pathlib import Path
@@ -182,7 +183,8 @@ class InferenceProcessor:
                     genus_confidence=payload.get("genus_confidence"),
                     species_confidence=payload.get("species_confidence"),
                     timestamp=payload['timestamp'],
-                    bounding_box=payload.get('bbox'), # The key is 'bbox' in storage, argument is 'bounding_box'
+                    # Convert the list to a JSON string to ensure robust transport.
+                    bounding_box=json.dumps(payload.get('bbox')), 
                     track_id=payload.get('track_id')
                 )
                 print(f"  ✓ Successfully uploaded detection: {payload.get('species', 'N/A')}")
