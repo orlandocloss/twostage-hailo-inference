@@ -548,7 +548,7 @@ class CameraStreamer:
         # Main loop state
         self.last_upload_time = time.time()
         self.recording_start_time = -1
-        self.recording_end_time = -1
+        self.target_frame_count = 0
         if self.sanity_video_percent > 0:
             self._schedule_next_recording()
 
@@ -565,7 +565,16 @@ class CameraStreamer:
 
                 with self.video_lock:
                     if self.is_recording:
-                        self.video_buffers[self.active_video_buffer_key].append(frame.copy())
+                        current_buffer = self.video_buffers[self.active_video_buffer_key]
+                        # The grabber is now responsible for stopping the recording
+                        # once the target number of frames has been collected.
+                        if len(current_buffer) < self.target_frame_count:
+                            current_buffer.append(frame.copy())
+                        
+                        if len(current_buffer) >= self.target_frame_count:
+                            self.is_recording = False
+                            print(f"🎬 Collected {self.target_frame_count} frames. Recording stopped by grabber.")
+
             except Exception as e:
                 if not self.stop_event.is_set():
                     logger.error(f"Error in frame grabber: {e}")
@@ -578,15 +587,16 @@ class CameraStreamer:
         
         if clip_duration < 1:
             self.recording_start_time = -1
+            self.target_frame_count = 0
             print("Interval too short or percentage too low to schedule a video.")
             return
 
+        self.target_frame_count = int(clip_duration * self.fps)
         max_start_offset = self.upload_interval - clip_duration
         start_offset = np.random.uniform(0, max_start_offset)
         
         self.recording_start_time = start_offset
-        self.recording_end_time = start_offset + clip_duration
-        print(f"Next sanity video scheduled: {clip_duration:.2f}s clip, starting at ~{start_offset:.2f}s into the next interval.")
+        print(f"Next sanity video scheduled: will collect {self.target_frame_count} frames, starting at ~{start_offset:.2f}s into the next interval.")
 
     def _main_processing_loop(self):
         """The main loop that pulls frames from the queue and processes them."""
@@ -613,17 +623,12 @@ class CameraStreamer:
                     self.video_buffers[self.active_video_buffer_key] = []
                     self.active_video_buffer_key = 'B' if self.active_video_buffer_key == 'A' else 'A'
 
+                # The FPS is now constant, based on the user's setting.
                 target_fps = self.fps
                 if self.sanity_video_percent > 0 and video_to_upload:
-                    clip_duration = self.upload_interval * (self.sanity_video_percent / 100.0)
-                    # FIX: Use the actual calculated FPS to preserve video duration and
-                    # real-time playback speed. Clamping caused incorrect video length.
-                    actual_fps = len(video_to_upload) / clip_duration if clip_duration > 0 else self.fps
-                    target_fps = actual_fps if actual_fps > 0 else self.fps
-
                     final_video_duration = len(video_to_upload) / target_fps if target_fps > 0 else 0
                     print(f"📹 Assembling video: {len(video_to_upload)} frames captured.")
-                    print(f"📹 Target duration: {clip_duration:.2f}s. Final duration: {final_video_duration:.2f}s at {target_fps:.1f} FPS.")
+                    print(f"📹 Playback: {final_video_duration:.2f}s video at a constant {target_fps:.1f} FPS.")
 
                 if detections_to_upload or video_to_upload:
                     print(f"Queuing {len(detections_to_upload)} detections and {len(video_to_upload)} video frames for upload.")
@@ -644,11 +649,9 @@ class CameraStreamer:
                 with self.video_lock:
                     if not self.is_recording and time_into_interval >= self.recording_start_time:
                         self.is_recording = True
-                        print(f"\n🎬 Starting sanity video recording at {time_into_interval:.2f}s into interval...")
-                    if self.is_recording and time_into_interval >= self.recording_end_time:
-                        self.is_recording = False
+                        # Prevent re-triggering this recording session.
                         self.recording_start_time = -1
-                        print(f"🎬 Finished recording signal sent to frame grabber.\n")
+                        print(f"\n🎬 Recording signal sent to grabber. Will collect {self.target_frame_count} frames.")
             
             # --- Frame Processing and Display ---
             if self.display:
