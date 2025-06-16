@@ -431,7 +431,9 @@ class InferenceProcessor:
                 self.draw_classification_labels(bgr_frame, x, y2, detection_data)
             
             timestamp = datetime.now().isoformat()
-            self.store_detection_locally(bgr_frame, detection_data, timestamp)
+            # OPTIMIZATION: Store the small cropped region, not the entire large frame.
+            # This dramatically reduces CPU usage in the main processing thread.
+            self.store_detection_locally(cropped_region, detection_data, timestamp)
         
         # Simplified summary message for performance
         if not show_boxes and len(valid_detection_data) > 0:
@@ -618,12 +620,16 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                         recording_start_time = -1 
                         print(f"🎬 Finished recording. Captured {len(video_buffers[active_video_buffer_key])} frames.\n")
 
-            # Process frame (only with full visualization if recording or displaying)
-            processed_frame = processor.process_frame(frame, show_boxes=(display or should_record_this_frame))
+            # Process frame for detections. Annotations are only drawn if display is enabled.
+            processed_frame = processor.process_frame(frame, show_boxes=display)
             
-            # Record frame if needed, into the currently active buffer
+            # Record frame if needed, into the currently active buffer.
+            # In headless mode, we store the original, un-annotated frame.
             if should_record_this_frame:
-                video_buffers[active_video_buffer_key].append(processed_frame.copy())
+                if display:
+                    video_buffers[active_video_buffer_key].append(processed_frame.copy())
+                else:
+                    video_buffers[active_video_buffer_key].append(frame.copy())
 
             if display:
                 cv2.imshow("Real-time Inference", processed_frame)
