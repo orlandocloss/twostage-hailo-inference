@@ -496,232 +496,222 @@ def uploader_worker(upload_queue, processor):
             
     print("Uploader worker finished.")
 
-def run_realtime(enable_uploads=False, display=True, upload_interval=60, 
+
+class CameraStreamer:
+    """
+    Manages the camera stream, processing, and uploading in separate threads.
+    This class encapsulates all the real-time logic for the application.
+    """
+    def __init__(self, enable_uploads=False, display=True, upload_interval=60, 
                  sanity_video_percent=0, device_id="test_pipeline2", fps=30):
-    
-    # The feature is enabled if the user provides a percentage greater than 0.
-    enable_sanity_video = sanity_video_percent > 0
+        
+        # Configuration
+        self.enable_uploads = enable_uploads
+        self.display = display
+        self.upload_interval = upload_interval
+        self.sanity_video_percent = sanity_video_percent > 0
+        self.device_id = device_id
+        self.fps = fps
 
-    processor = InferenceProcessor(enable_uploads=enable_uploads, device_id=device_id)
-    picam2 = initialize_camera(fps=fps)
+        # Core components
+        self.processor = InferenceProcessor(enable_uploads=self.enable_uploads, device_id=self.device_id)
+        self.picam2 = initialize_camera(fps=self.fps)
 
-    # --- Frame Grabber Thread for Maximum FPS & Real-time Video Recording ---
-    latest_frame = None
-    frame_lock = threading.Lock()
-    video_lock = threading.Lock()
-    stop_event = threading.Event()
+        # Threading and state management
+        self.stop_event = threading.Event()
+        self.video_lock = threading.Lock()
 
-    # --- State shared with the Frame Grabber ---
-    # These are controlled by the main loop and read by the grabber.
-    video_buffers = {'A': [], 'B': []}
-    active_video_buffer_key = 'A'
-    is_recording = False
+        # Uploader thread
+        self.uploader_queue = None
+        self.uploader_thread = None
+        if self.enable_uploads:
+            self.uploader_queue = queue.Queue()
+            self.uploader_thread = threading.Thread(
+                target=uploader_worker, 
+                args=(self.uploader_queue, self.processor), 
+                daemon=True
+            )
 
-    def frame_grabber_worker(picam2, stop_event):
-        nonlocal latest_frame, is_recording, video_buffers, active_video_buffer_key
+        # Frame grabber thread and its shared state
+        self.frame_queue = queue.Queue(maxsize=self.fps * 2)
+        self.video_buffers = {'A': [], 'B': []}
+        self.active_video_buffer_key = 'A'
+        self.is_recording = False
+        self.frame_grabber_thread = threading.Thread(
+            target=self._frame_grabber_worker,
+            daemon=True
+        )
+
+        # Main loop state
+        self.last_upload_time = time.time()
+        self.recording_start_time = -1
+        self.recording_end_time = -1
+        if self.sanity_video_percent:
+            self._schedule_next_recording()
+
+    def _frame_grabber_worker(self):
+        """
+        Worker function to grab frames from the camera and put them in a queue.
+        Also handles real-time video recording to prevent frame drops.
+        """
         print("Frame grabber worker started.")
-        while not stop_event.is_set():
+        while not self.stop_event.is_set():
             try:
-                frame = picam2.capture_array()
-                with frame_lock:
-                    latest_frame = frame
+                frame = self.picam2.capture_array()
+                self.frame_queue.put(frame)
 
-                # The grabber thread is now responsible for recording video
-                # to ensure no frames are dropped, even if processing is slow.
-                with video_lock:
-                    if is_recording:
-                        video_buffers[active_video_buffer_key].append(frame.copy())
-
+                with self.video_lock:
+                    if self.is_recording:
+                        self.video_buffers[self.active_video_buffer_key].append(frame.copy())
             except Exception as e:
-                # This can happen if the camera is stopped during shutdown
-                if not stop_event.is_set():
+                if not self.stop_event.is_set():
                     logger.error(f"Error in frame grabber: {e}")
                 break
         print("Frame grabber worker finished.")
 
-    frame_grabber_thread = threading.Thread(
-        target=frame_grabber_worker, 
-        args=(picam2, stop_event),
-        daemon=True
-    )
-    frame_grabber_thread.start()
-
-    # --- Asynchronous Uploader Setup ---
-    upload_queue = None
-    uploader_thread = None
-    if enable_uploads:
-        upload_queue = queue.Queue()
-        uploader_thread = threading.Thread(
-            target=uploader_worker, 
-            args=(upload_queue, processor), 
-            daemon=True
-        )
-        uploader_thread.start()
-    
-    # --- State variables for the main loop ---
-    last_upload_time = time.time()
-    
-    # --- Double buffer for just-in-time video recording ---
-    # The buffers themselves are now managed in the frame grabber scope
-    recording_start_time = -1
-    recording_end_time = -1
-
-    def schedule_next_recording():
+    def _schedule_next_recording(self):
         """Determines the time window for the next sanity video."""
-        nonlocal recording_start_time, recording_end_time
-        
-        # Calculate the duration of the video clip in seconds
-        clip_duration = upload_interval * (sanity_video_percent / 100.0)
+        clip_duration = self.upload_interval * (self.sanity_video_percent / 100.0)
         
         if clip_duration < 1:
-            recording_start_time = -1 # No recording this interval
+            self.recording_start_time = -1
             print("Interval too short or percentage too low to schedule a video.")
             return
 
-        # Randomly choose a start time for the clip within the next interval
-        # The start time is an offset from the beginning of the interval
-        max_start_offset = upload_interval - clip_duration
+        max_start_offset = self.upload_interval - clip_duration
         start_offset = np.random.uniform(0, max_start_offset)
         
-        # These are relative to the 'last_upload_time' which marks the start of the interval
-        recording_start_time = start_offset
-        recording_end_time = start_offset + clip_duration
+        self.recording_start_time = start_offset
+        self.recording_end_time = start_offset + clip_duration
         print(f"Next sanity video scheduled: {clip_duration:.2f}s clip, starting at ~{start_offset:.2f}s into the next interval.")
 
-    # Schedule the first recording session
-    if enable_sanity_video:
-        schedule_next_recording()
-
-    # Wait for the first frame to be captured by the grabber thread
-    print("Waiting for first frame from camera...")
-    while latest_frame is None:
-        if not frame_grabber_thread.is_alive():
-            raise RuntimeError("Frame grabber thread died unexpectedly.")
-        time.sleep(0.1)
-    print("First frame received. Starting main processing loop.")
-
-    try:
-        while True:
-            with frame_lock:
-                if latest_frame is None:
-                    continue # Should not happen after initial wait
-                # Make a copy to work on, releasing the lock quickly
-                frame = latest_frame.copy()
+    def _main_processing_loop(self):
+        """The main loop that pulls frames from the queue and processes them."""
+        while not self.stop_event.is_set():
+            try:
+                frame = self.frame_queue.get(timeout=1.0)
+            except queue.Empty:
+                if not self.frame_grabber_thread.is_alive():
+                    print("Frame grabber thread has terminated. Exiting main loop.")
+                    break
+                print("No frame in queue for 1 second, continuing...")
+                continue
 
             current_time = time.time()
-            time_since_last_upload = current_time - last_upload_time
+            time_since_last_upload = current_time - self.last_upload_time
 
             # --- Asynchronous Batch Upload Logic ---
-            if enable_uploads and (time_since_last_upload >= upload_interval):
-                print(f"\n--- Upload interval of {upload_interval}s reached. Offloading data for async upload. ---")
+            if self.enable_uploads and (time_since_last_upload >= self.upload_interval):
+                print(f"\n--- Upload interval of {self.upload_interval}s reached. Offloading data for async upload. ---")
+                detections_to_upload = self.processor.get_full_buffer_and_swap()
                 
-                # 1. Get the full detection buffer from the processor and swap to the new one
-                detections_to_upload = processor.get_full_buffer_and_swap()
-                
-                # 2. Swap video buffers and get the full one
-                with video_lock:
-                    video_to_upload = video_buffers[active_video_buffer_key]
-                    video_buffers[active_video_buffer_key] = []  # Clear the now-inactive buffer
-                    active_video_buffer_key = 'B' if active_video_buffer_key == 'A' else 'A'
+                with self.video_lock:
+                    video_to_upload = self.video_buffers[self.active_video_buffer_key]
+                    self.video_buffers[self.active_video_buffer_key] = []
+                    self.active_video_buffer_key = 'B' if self.active_video_buffer_key == 'A' else 'A'
 
-                target_fps = fps # Default to the camera's target FPS
-                if enable_sanity_video and video_to_upload:
-                    # --- REVISED FPS & DURATION LOGIC ---
-                    # The number of frames is now a true reflection of the camera's output.
-                    # Calculate the actual FPS based on frames captured in the time window.
-                    clip_duration = upload_interval * (sanity_video_percent / 100.0)
-                    actual_fps = len(video_to_upload) / clip_duration if clip_duration > 0 else fps
-                    target_fps = max(5, min(actual_fps, fps + 5)) # Clamp to a reasonable range
-
+                target_fps = self.fps
+                if self.sanity_video_percent and video_to_upload:
+                    clip_duration = self.upload_interval * (self.sanity_video_percent / 100.0)
+                    actual_fps = len(video_to_upload) / clip_duration if clip_duration > 0 else self.fps
+                    target_fps = max(5, min(actual_fps, self.fps + 5))
                     final_video_duration = len(video_to_upload) / target_fps
                     print(f"📹 Assembling video: {len(video_to_upload)} frames captured in ~{clip_duration:.1f}s.")
                     print(f"📹 Target playback: {target_fps:.1f} FPS for a {final_video_duration:.1f}s video.")
 
-                # 3. Queue the data for the uploader thread
                 if detections_to_upload or video_to_upload:
                     print(f"Queuing {len(detections_to_upload)} detections and {len(video_to_upload)} video frames for upload.")
-                    upload_queue.put((detections_to_upload, video_to_upload, target_fps))
+                    self.uploader_queue.put((detections_to_upload, video_to_upload, target_fps))
                 else:
                     print("No new detections or video frames to upload in this interval.")
 
-                # 4. Reset timers and schedule the next recording cycle
-                last_upload_time = time.time()
-                processor.frame_count = 0  # Reset frame count for the new interval
-                if enable_sanity_video:
-                    schedule_next_recording()
-
+                self.last_upload_time = time.time()
+                # CRITICAL FIX: Do NOT reset. Tracker needs continuous frame count.
+                # self.processor.frame_count = 0
+                if self.sanity_video_percent:
+                    self._schedule_next_recording()
                 print("--- Resuming detections into new buffers. ---")
 
-            # --- Just-in-Time Recording Logic (check BEFORE processing for efficiency) ---
-            should_record_this_frame = False
-            if enable_sanity_video and recording_start_time != -1:
-                # Check if the current time is within the recording window
-                # Time is measured as an offset from the start of the interval
-                time_into_interval = current_time - last_upload_time
-                
-                with video_lock: # Use lock to safely modify shared 'is_recording' flag
-                    if not is_recording and time_into_interval >= recording_start_time:
-                        is_recording = True
+            # --- Sanity Video Recording Control ---
+            if self.sanity_video_percent and self.recording_start_time != -1:
+                time_into_interval = current_time - self.last_upload_time
+                with self.video_lock:
+                    if not self.is_recording and time_into_interval >= self.recording_start_time:
+                        self.is_recording = True
                         print(f"\n🎬 Starting sanity video recording at {time_into_interval:.2f}s into interval...")
-                    
-                    if is_recording:
-                        if time_into_interval >= recording_end_time:
-                            # This just signals the grabber to stop recording.
-                            is_recording = False
-                            recording_start_time = -1 
-                            print(f"🎬 Finished recording signal sent to frame grabber.\n")
-
-            # Now, process the frame for detections. This is the slow part.
-            # The returned annotated frame is only used for the live display.
-            if display:
-                processed_frame = processor.process_frame(frame, show_boxes=True)
+                    if self.is_recording and time_into_interval >= self.recording_end_time:
+                        self.is_recording = False
+                        self.recording_start_time = -1
+                        print(f"🎬 Finished recording signal sent to frame grabber.\n")
+            
+            # --- Frame Processing and Display ---
+            if self.display:
+                processed_frame = self.processor.process_frame(frame, show_boxes=True)
                 cv2.imshow("Real-time Inference", processed_frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             else:
-                # In headless mode, we still need to process for detections, but don't need the annotated frame.
-                processor.process_frame(frame, show_boxes=False)
-            
-    except KeyboardInterrupt:
-        print("Interrupted by user")
-    finally:
-        # --- Graceful Shutdown ---
-        print("\n--- Initiating shutdown sequence... ---")
-        
-        # 1. Stop the frame grabber thread first to halt camera access.
-        print("Stopping frame grabber...")
-        stop_event.set()
-        if frame_grabber_thread.is_alive():
-            frame_grabber_thread.join()
+                self.processor.process_frame(frame, show_boxes=False)
 
-        # 2. Stop hardware and UI first to prevent crashes on Ctrl+C.
+    def start(self):
+        """Starts all worker threads and the main processing loop."""
+        print("Starting camera stream...")
+        self.frame_grabber_thread.start()
+        if self.uploader_thread:
+            self.uploader_thread.start()
+
+        print("Waiting for first frame from camera...")
+        try:
+            frame = self.frame_queue.get(timeout=5)
+            self.frame_queue.put(frame) # Put it back for processing
+        except queue.Empty:
+            raise RuntimeError("Camera failed to produce a frame within 5 seconds.")
+        print("First frame received. Starting main processing loop.")
+
+        try:
+            self._main_processing_loop()
+        except KeyboardInterrupt:
+            print("Interrupted by user")
+        finally:
+            self.stop()
+
+    def stop(self):
+        """Handles the graceful shutdown of all components."""
+        print("\n--- Initiating shutdown sequence... ---")
+        self.stop_event.set()
+
+        if self.frame_grabber_thread.is_alive():
+            while not self.frame_queue.empty():
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self.frame_grabber_thread.join(timeout=2.0)
+
         print("Stopping camera...")
-        picam2.stop()
-        if display:
+        self.picam2.stop()
+        if self.display:
             print("Closing display windows...")
             cv2.destroyAllWindows()
 
-        # 3. Handle final uploads now that hardware is safe.
-        if enable_uploads and upload_queue is not None and uploader_thread.is_alive():
+        if self.enable_uploads and self.uploader_thread and self.uploader_thread.is_alive():
             print("Queueing final batch of data before exit...")
-            # Get any remaining data from the currently active buffers
-            final_detections = processor.get_full_buffer_and_swap()
-            with video_lock:
-                final_video = video_buffers[active_video_buffer_key]
+            final_detections = self.processor.get_full_buffer_and_swap()
+            with self.video_lock:
+                final_video = self.video_buffers[self.active_video_buffer_key]
             
             if final_detections or final_video:
-                # Use default FPS for final video chunk
-                upload_queue.put((final_detections, final_video, fps))
+                self.uploader_queue.put((final_detections, final_video, self.fps))
             
-            # Signal the uploader to finish its queue and exit
             print("Waiting for all pending uploads to complete...")
-            upload_queue.put(None)  # Sentinel to stop the worker
-            upload_queue.join()     # Wait for all items to be processed
-            uploader_thread.join()  # Wait for the thread to terminate
+            self.uploader_queue.put(None)
+            self.uploader_queue.join()
+            self.uploader_thread.join()
             print("All uploads finished.")
 
-        processor.shutdown()
+        self.processor.shutdown()
         print("--- Shutdown complete. ---")
+
 
 def main():
     parser = argparse.ArgumentParser(description='Real-time two-stage inference processor for insect tracking.')
@@ -740,8 +730,8 @@ def main():
                         help='Target camera FPS. Affects performance. Default: 30')
     
     args = parser.parse_args()
-    
-    run_realtime(
+
+    streamer = CameraStreamer(
         enable_uploads=args.enable_uploads, 
         display=args.display, 
         upload_interval=args.upload_interval,
@@ -749,6 +739,8 @@ def main():
         device_id=args.device_id,
         fps=args.fps
     )
+    streamer.start()
+
 
 if __name__ == "__main__":
     main()
