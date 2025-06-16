@@ -509,7 +509,7 @@ class CameraStreamer:
         self.enable_uploads = enable_uploads
         self.display = display
         self.upload_interval = upload_interval
-        self.sanity_video_percent = sanity_video_percent > 0
+        self.sanity_video_percent = sanity_video_percent
         self.device_id = device_id
         self.fps = fps
 
@@ -546,7 +546,7 @@ class CameraStreamer:
         self.last_upload_time = time.time()
         self.recording_start_time = -1
         self.recording_end_time = -1
-        if self.sanity_video_percent:
+        if self.sanity_video_percent > 0:
             self._schedule_next_recording()
 
     def _frame_grabber_worker(self):
@@ -611,7 +611,7 @@ class CameraStreamer:
                     self.active_video_buffer_key = 'B' if self.active_video_buffer_key == 'A' else 'A'
 
                 target_fps = self.fps
-                if self.sanity_video_percent and video_to_upload:
+                if self.sanity_video_percent > 0 and video_to_upload:
                     clip_duration = self.upload_interval * (self.sanity_video_percent / 100.0)
                     actual_fps = len(video_to_upload) / clip_duration if clip_duration > 0 else self.fps
                     target_fps = max(5, min(actual_fps, self.fps + 5))
@@ -628,12 +628,12 @@ class CameraStreamer:
                 self.last_upload_time = time.time()
                 # CRITICAL FIX: Do NOT reset. Tracker needs continuous frame count.
                 # self.processor.frame_count = 0
-                if self.sanity_video_percent:
+                if self.sanity_video_percent > 0:
                     self._schedule_next_recording()
                 print("--- Resuming detections into new buffers. ---")
 
             # --- Sanity Video Recording Control ---
-            if self.sanity_video_percent and self.recording_start_time != -1:
+            if self.sanity_video_percent > 0 and self.recording_start_time != -1:
                 time_into_interval = current_time - self.last_upload_time
                 with self.video_lock:
                     if not self.is_recording and time_into_interval >= self.recording_start_time:
