@@ -569,15 +569,31 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
 
                 target_fps = 15 # Default
                 if enable_sanity_video and video_to_upload:
-                    # Calculate FPS to maintain the intended video duration
-                    actual_clip_duration = recording_end_time - recording_start_time
+                    # --- REVISED FPS & DURATION LOGIC ---
+                    # 1. Calculate the actual average FPS achieved during the last interval.
+                    # This gives a realistic playback speed based on system performance.
+                    interval_duration = time.time() - last_upload_time
+                    actual_fps = processor.frame_count / interval_duration if interval_duration > 0 else 15
+                    # Clamp to a reasonable range for stability.
+                    target_fps = max(5, min(actual_fps, 30))
+
+                    # 2. Calculate the target number of frames for the desired video length.
+                    clip_duration = upload_interval * (sanity_video_percent / 100.0)
+                    target_frame_count = int(clip_duration * target_fps)
+
+                    # 3. If processing was slow and we have too few frames, pad the video.
+                    # This ensures the video is always the desired length.
+                    num_missing_frames = target_frame_count - len(video_to_upload)
+                    if num_missing_frames > 0:
+                        print(f"⚠️ Processing was slow. Padding video with {num_missing_frames} frames to meet target duration.")
+                        last_frame = video_to_upload[-1]
+                        video_to_upload.extend([last_frame] * num_missing_frames)
                     
-                    # Set FPS so the video duration matches the recording time window
-                    target_fps = len(video_to_upload) / actual_clip_duration if actual_clip_duration > 0 else 15
-                    target_fps = max(5, min(target_fps, 30))  # Cap between 5-30 FPS
-                    
+                    # Ensure we don't have too many frames (can happen if FPS fluctuates)
+                    video_to_upload = video_to_upload[:target_frame_count]
+
                     final_video_duration = len(video_to_upload) / target_fps
-                    print(f"📹 Assembling video: {len(video_to_upload)} frames from a {actual_clip_duration:.1f}s window.")
+                    print(f"📹 Assembling video: {len(video_to_upload)} frames from a {clip_duration:.1f}s window.")
                     print(f"📹 Target playback: {target_fps:.1f} FPS for a {final_video_duration:.1f}s video.")
 
                 # 3. Queue the data for the uploader thread
