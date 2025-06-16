@@ -251,8 +251,9 @@ class InferenceProcessor:
             out = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
 
             for frame in video_frames:
-                # The processed frames are already in BGR format (from process_frame), so write directly
-                out.write(frame)
+                # The frames are captured in RGB, but VideoWriter expects BGR.
+                bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                out.write(bgr_frame)
             out.release()
             print(f"Temporary video saved to {temp_video_path}")
 
@@ -335,9 +336,13 @@ class InferenceProcessor:
                                        cost_threshold=0.8)
             print(f"Initialized tracker for {width}x{height} frame with intelligent track memory")
         
+        # Convert the incoming RGB frame to BGR for all OpenCV drawing/display operations.
+        # The original RGB frame is still used for inference.
+        bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        
         infer_results = run_inference(
             net=self.model_path,
-            input=frame,
+            input=frame, # Use original RGB frame for Hailo
             batch_size=self.batch_size,
             labels=self.labels_path,
             save_stream_output=False
@@ -346,9 +351,6 @@ class InferenceProcessor:
         # Only show detailed debug in real-time mode (when show_boxes=True)
         if show_boxes:
             print(f"Found {len(infer_results)} raw detections")
-        
-        # Only create BGR copy if we need to draw on it
-        bgr_frame = frame.copy() if show_boxes else frame
         
         # First pass: collect all valid detections for tracking
         valid_detections = []
@@ -413,7 +415,7 @@ class InferenceProcessor:
                     cv2.putText(bgr_frame, f"ID:{track_id}", (x, y - 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
             
-            # Perform classification
+            # Perform classification on the original RGB frame crop
             cropped_region = cv2.resize(frame[y:y2, x:x2], (224, 224))
             classification_results = infer_image(cropped_region, hef_path=self.classification_model)
             
@@ -433,6 +435,7 @@ class InferenceProcessor:
             timestamp = datetime.now().isoformat()
             # REVERTED: Store the full frame for context, not the small cropped region.
             # This increases CPU usage but provides full context for each detection.
+            # We store the BGR frame, which will have annotations if display is enabled.
             self.store_detection_locally(bgr_frame, detection_data, timestamp)
         
         # Simplified summary message for performance
@@ -616,8 +619,8 @@ class CameraStreamer:
                     actual_fps = len(video_to_upload) / clip_duration if clip_duration > 0 else self.fps
                     target_fps = max(5, min(actual_fps, self.fps + 5))
                     final_video_duration = len(video_to_upload) / target_fps
-                    print(f"📹 Assembling video: {len(video_to_upload)} frames captured in ~{clip_duration:.1f}s.")
-                    print(f"📹 Target playback: {target_fps:.1f} FPS for a {final_video_duration:.1f}s video.")
+                    print(f"📹 Assembling video: {len(video_to_upload)} frames captured.")
+                    print(f"📹 Target duration: {clip_duration:.2f}s. Final duration: {final_video_duration:.2f}s at {target_fps:.1f} FPS.")
 
                 if detections_to_upload or video_to_upload:
                     print(f"Queuing {len(detections_to_upload)} detections and {len(video_to_upload)} video frames for upload.")
