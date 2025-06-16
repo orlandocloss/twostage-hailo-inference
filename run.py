@@ -526,10 +526,10 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                 with frame_lock:
                     latest_frame = frame
 
-                # NEW: The grabber thread is now responsible for recording video
+                # The grabber thread is now responsible for recording video
                 # to ensure no frames are dropped, even if processing is slow.
-                if is_recording:
-                    with video_lock:
+                with video_lock:
+                    if is_recording:
                         video_buffers[active_video_buffer_key].append(frame.copy())
 
             except Exception as e:
@@ -647,7 +647,6 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                 # 4. Reset timers and schedule the next recording cycle
                 last_upload_time = time.time()
                 processor.frame_count = 0  # Reset frame count for the new interval
-                is_recording = False
                 if enable_sanity_video:
                     schedule_next_recording()
 
@@ -660,19 +659,17 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                 # Time is measured as an offset from the start of the interval
                 time_into_interval = current_time - last_upload_time
                 
-                if not is_recording and time_into_interval >= recording_start_time:
-                    is_recording = True
-                    print(f"\n🎬 Starting sanity video recording at {time_into_interval:.2f}s into interval...")
-                
-                if is_recording:
-                    should_record_this_frame = True
-                    if time_into_interval >= recording_end_time:
-                        # This just signals the grabber to stop recording.
-                        # The number of frames will be whatever was captured in the window.
-                        is_recording = False
-                        recording_start_time = -1 
-                        # We can't know the final frame count here, so the message is more general.
-                        print(f"🎬 Finished recording signal sent to frame grabber.\n")
+                with video_lock: # Use lock to safely modify shared 'is_recording' flag
+                    if not is_recording and time_into_interval >= recording_start_time:
+                        is_recording = True
+                        print(f"\n🎬 Starting sanity video recording at {time_into_interval:.2f}s into interval...")
+                    
+                    if is_recording:
+                        if time_into_interval >= recording_end_time:
+                            # This just signals the grabber to stop recording.
+                            is_recording = False
+                            recording_start_time = -1 
+                            print(f"🎬 Finished recording signal sent to frame grabber.\n")
 
             # Now, process the frame for detections. This is the slow part.
             # The returned annotated frame is only used for the live display.
