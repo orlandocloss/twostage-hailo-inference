@@ -642,8 +642,15 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
         # --- Graceful Shutdown ---
         print("\n--- Initiating shutdown sequence... ---")
         
-        # Final upload of any remaining data
-        if enable_uploads and upload_queue is not None:
+        # 1. Stop hardware and UI first to prevent crashes on Ctrl+C.
+        print("Stopping camera...")
+        picam2.stop()
+        if display:
+            print("Closing display windows...")
+            cv2.destroyAllWindows()
+
+        # 2. Handle final uploads now that hardware is safe.
+        if enable_uploads and upload_queue is not None and uploader_thread.is_alive():
             print("Queueing final batch of data before exit...")
             # Get any remaining data from the currently active buffers
             final_detections = processor.get_full_buffer_and_swap()
@@ -661,9 +668,6 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
             print("All uploads finished.")
 
         processor.shutdown()
-        if display:
-            cv2.destroyAllWindows()
-        picam2.stop()
         print("--- Shutdown complete. ---")
 
 def main():
