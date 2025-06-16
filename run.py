@@ -505,19 +505,33 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
     processor = InferenceProcessor(enable_uploads=enable_uploads, device_id=device_id)
     picam2 = initialize_camera(fps=fps)
 
-    # --- Frame Grabber Thread for Maximum FPS ---
+    # --- Frame Grabber Thread for Maximum FPS & Real-time Video Recording ---
     latest_frame = None
     frame_lock = threading.Lock()
+    video_lock = threading.Lock()
     stop_event = threading.Event()
 
+    # --- State shared with the Frame Grabber ---
+    # These are controlled by the main loop and read by the grabber.
+    video_buffers = {'A': [], 'B': []}
+    active_video_buffer_key = 'A'
+    is_recording = False
+
     def frame_grabber_worker(picam2, stop_event):
-        nonlocal latest_frame
+        nonlocal latest_frame, is_recording, video_buffers, active_video_buffer_key
         print("Frame grabber worker started.")
         while not stop_event.is_set():
             try:
                 frame = picam2.capture_array()
                 with frame_lock:
                     latest_frame = frame
+
+                # NEW: The grabber thread is now responsible for recording video
+                # to ensure no frames are dropped, even if processing is slow.
+                if is_recording:
+                    with video_lock:
+                        video_buffers[active_video_buffer_key].append(frame.copy())
+
             except Exception as e:
                 # This can happen if the camera is stopped during shutdown
                 if not stop_event.is_set():
@@ -548,10 +562,7 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
     last_upload_time = time.time()
     
     # --- Double buffer for just-in-time video recording ---
-    video_buffers = {'A': [], 'B': []}
-    active_video_buffer_key = 'A'
-    
-    is_recording = False
+    # The buffers themselves are now managed in the frame grabber scope
     recording_start_time = -1
     recording_end_time = -1
 
@@ -608,37 +619,22 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                 detections_to_upload = processor.get_full_buffer_and_swap()
                 
                 # 2. Swap video buffers and get the full one
-                video_to_upload = video_buffers[active_video_buffer_key]
-                video_buffers[active_video_buffer_key] = []  # Clear the now-inactive buffer
-                active_video_buffer_key = 'B' if active_video_buffer_key == 'A' else 'A'
+                with video_lock:
+                    video_to_upload = video_buffers[active_video_buffer_key]
+                    video_buffers[active_video_buffer_key] = []  # Clear the now-inactive buffer
+                    active_video_buffer_key = 'B' if active_video_buffer_key == 'A' else 'A'
 
-                target_fps = 15 # Default
+                target_fps = fps # Default to the camera's target FPS
                 if enable_sanity_video and video_to_upload:
                     # --- REVISED FPS & DURATION LOGIC ---
-                    # 1. Calculate the actual average FPS achieved during the last interval.
-                    # This gives a realistic playback speed based on system performance.
-                    interval_duration = time.time() - last_upload_time
-                    actual_fps = processor.frame_count / interval_duration if interval_duration > 0 else 15
-                    # Clamp to a reasonable range for stability.
-                    target_fps = max(5, min(actual_fps, 30))
-
-                    # 2. Calculate the target number of frames for the desired video length.
+                    # The number of frames is now a true reflection of the camera's output.
+                    # Calculate the actual FPS based on frames captured in the time window.
                     clip_duration = upload_interval * (sanity_video_percent / 100.0)
-                    target_frame_count = int(clip_duration * target_fps)
-
-                    # 3. If processing was slow and we have too few frames, pad the video.
-                    # This ensures the video is always the desired length.
-                    num_missing_frames = target_frame_count - len(video_to_upload)
-                    if num_missing_frames > 0:
-                        print(f"⚠️ Processing was slow. Padding video with {num_missing_frames} frames to meet target duration.")
-                        last_frame = video_to_upload[-1]
-                        video_to_upload.extend([last_frame] * num_missing_frames)
-                    
-                    # Ensure we don't have too many frames (can happen if FPS fluctuates)
-                    video_to_upload = video_to_upload[:target_frame_count]
+                    actual_fps = len(video_to_upload) / clip_duration if clip_duration > 0 else fps
+                    target_fps = max(5, min(actual_fps, fps + 5)) # Clamp to a reasonable range
 
                     final_video_duration = len(video_to_upload) / target_fps
-                    print(f"📹 Assembling video: {len(video_to_upload)} frames from a {clip_duration:.1f}s window.")
+                    print(f"📹 Assembling video: {len(video_to_upload)} frames captured in ~{clip_duration:.1f}s.")
                     print(f"📹 Target playback: {target_fps:.1f} FPS for a {final_video_duration:.1f}s video.")
 
                 # 3. Queue the data for the uploader thread
@@ -671,16 +667,12 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                 if is_recording:
                     should_record_this_frame = True
                     if time_into_interval >= recording_end_time:
+                        # This just signals the grabber to stop recording.
+                        # The number of frames will be whatever was captured in the window.
                         is_recording = False
-                        # Mark as done so we don't record again this interval
                         recording_start_time = -1 
-                        print(f"🎬 Finished recording. Captured {len(video_buffers[active_video_buffer_key])} frames.\n")
-
-            # NEW: Record the raw frame for the sanity video BEFORE processing.
-            # This is fast and decouples video recording from processing time,
-            # ensuring consistent video length and frame rate.
-            if should_record_this_frame:
-                video_buffers[active_video_buffer_key].append(frame.copy())
+                        # We can't know the final frame count here, so the message is more general.
+                        print(f"🎬 Finished recording signal sent to frame grabber.\n")
 
             # Now, process the frame for detections. This is the slow part.
             # The returned annotated frame is only used for the live display.
@@ -717,11 +709,12 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
             print("Queueing final batch of data before exit...")
             # Get any remaining data from the currently active buffers
             final_detections = processor.get_full_buffer_and_swap()
-            final_video = video_buffers[active_video_buffer_key]
+            with video_lock:
+                final_video = video_buffers[active_video_buffer_key]
             
             if final_detections or final_video:
                 # Use default FPS for final video chunk
-                upload_queue.put((final_detections, final_video, 15))
+                upload_queue.put((final_detections, final_video, fps))
             
             # Signal the uploader to finish its queue and exit
             print("Waiting for all pending uploads to complete...")
