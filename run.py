@@ -251,9 +251,9 @@ class InferenceProcessor:
             out = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
 
             for frame in video_frames:
-                # The frames are captured in RGB, but VideoWriter expects BGR.
-                bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                out.write(bgr_frame)
+                # Per user request, reverting BGR conversion.
+                # This may cause color issues in standard video players.
+                out.write(frame)
             out.release()
             print(f"Temporary video saved to {temp_video_path}")
 
@@ -336,9 +336,9 @@ class InferenceProcessor:
                                        cost_threshold=0.8)
             print(f"Initialized tracker for {width}x{height} frame with intelligent track memory")
         
-        # Convert the incoming RGB frame to BGR for all OpenCV drawing/display operations.
-        # The original RGB frame is still used for inference.
-        bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        # Per user request, all OpenCV drawing/saving is done on the raw RGB frame.
+        # This may result in incorrect colors in the display and saved images.
+        bgr_frame = frame
         
         infer_results = run_inference(
             net=self.model_path,
@@ -435,7 +435,7 @@ class InferenceProcessor:
             timestamp = datetime.now().isoformat()
             # REVERTED: Store the full frame for context, not the small cropped region.
             # This increases CPU usage but provides full context for each detection.
-            # We store the BGR frame, which will have annotations if display is enabled.
+            # Per user request, storing the raw frame, which may have color issues.
             self.store_detection_locally(bgr_frame, detection_data, timestamp)
         
         # Simplified summary message for performance
@@ -616,9 +616,12 @@ class CameraStreamer:
                 target_fps = self.fps
                 if self.sanity_video_percent > 0 and video_to_upload:
                     clip_duration = self.upload_interval * (self.sanity_video_percent / 100.0)
+                    # FIX: Use the actual calculated FPS to preserve video duration and
+                    # real-time playback speed. Clamping caused incorrect video length.
                     actual_fps = len(video_to_upload) / clip_duration if clip_duration > 0 else self.fps
-                    target_fps = max(5, min(actual_fps, self.fps + 5))
-                    final_video_duration = len(video_to_upload) / target_fps
+                    target_fps = actual_fps if actual_fps > 0 else self.fps
+
+                    final_video_duration = len(video_to_upload) / target_fps if target_fps > 0 else 0
                     print(f"📹 Assembling video: {len(video_to_upload)} frames captured.")
                     print(f"📹 Target duration: {clip_duration:.2f}s. Final duration: {final_video_duration:.2f}s at {target_fps:.1f} FPS.")
 
