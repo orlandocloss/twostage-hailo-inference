@@ -636,21 +636,22 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                         recording_start_time = -1 
                         print(f"🎬 Finished recording. Captured {len(video_buffers[active_video_buffer_key])} frames.\n")
 
-            # Process frame for detections. Annotations are only drawn if display is enabled.
-            processed_frame = processor.process_frame(frame, show_boxes=display)
-            
-            # Record frame if needed, into the currently active buffer.
-            # In headless mode, we store the original, un-annotated frame.
+            # NEW: Record the raw frame for the sanity video BEFORE processing.
+            # This is fast and decouples video recording from processing time,
+            # ensuring consistent video length and frame rate.
             if should_record_this_frame:
-                if display:
-                    video_buffers[active_video_buffer_key].append(processed_frame.copy())
-                else:
-                    video_buffers[active_video_buffer_key].append(frame.copy())
+                video_buffers[active_video_buffer_key].append(frame.copy())
 
+            # Now, process the frame for detections. This is the slow part.
+            # The returned annotated frame is only used for the live display.
             if display:
+                processed_frame = processor.process_frame(frame, show_boxes=True)
                 cv2.imshow("Real-time Inference", processed_frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
+            else:
+                # In headless mode, we still need to process for detections, but don't need the annotated frame.
+                processor.process_frame(frame, show_boxes=False)
             
     except KeyboardInterrupt:
         print("Interrupted by user")
