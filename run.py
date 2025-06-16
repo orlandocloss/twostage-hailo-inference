@@ -42,7 +42,10 @@ class InferenceProcessor:
         self.model_id = "london_141"
         self.enable_uploads = enable_uploads
         
-        self.local_detections = []
+        # Double buffer for asynchronous uploads
+        self.detection_buffers = {'A': [], 'B': []}
+        self.active_buffer_key = 'A'
+        self.buffer_lock = threading.Lock()
         
         # Initialize tracker (will be set up when we know frame dimensions)
         self.tracker = None
@@ -55,6 +58,18 @@ class InferenceProcessor:
         if self.enable_uploads:
             self.sgc = self.initialize_sensing_garden_client()
         
+    def get_full_buffer_and_swap(self):
+        """
+        Safely swaps the active detection buffer and returns the one that is full.
+        This is designed to be called by the main thread, which then passes the
+        returned buffer to the upload worker.
+        """
+        with self.buffer_lock:
+            full_buffer = self.detection_buffers[self.active_buffer_key]
+            self.detection_buffers[self.active_buffer_key] = []  # Clear the buffer for future use
+            self.active_buffer_key = 'B' if self.active_buffer_key == 'A' else 'A'
+            return full_buffer
+
     def load_class_names(self, class_names_path):
         try:
             with open(class_names_path, 'r') as f:
@@ -144,26 +159,30 @@ class InferenceProcessor:
                 "timestamp": timestamp,
                 **detection_data  # Unpacks family, genus, species, confidences, bbox, track_id
             }
-
-            self.local_detections.append(payload)
-            print(f"💿 Locally stored detection: {payload.get('species', 'N/A')} (total stored: {len(self.local_detections)})")
+            
+            with self.buffer_lock:
+                self.detection_buffers[self.active_buffer_key].append(payload)
+            print(f"💿 Locally stored detection: {payload.get('species', 'N/A')} (buffer '{self.active_buffer_key}' size: {len(self.detection_buffers[self.active_buffer_key])})")
             sys.stdout.flush()
 
         except Exception as e:
             print(f"Error storing detection locally: {e}")
 
-    def upload_local_batch(self):
-        """Uploads all locally stored detections and clears the list on success."""
-        if not self.enable_uploads or not self.local_detections:
+    def upload_local_batch(self, detections_to_upload):
+        """
+        Uploads a given batch of detections. Returns a list of failed detections.
+        This is designed to be called from the uploader worker thread.
+        """
+        if not self.enable_uploads or not detections_to_upload:
             if self.enable_uploads:
                 print("No local detections to upload.")
-            return
+            return []
 
-        print(f"\n--- ☁️ Starting batch upload of {len(self.local_detections)} detections ---")
+        print(f"\n--- ☁️ Starting batch upload of {len(detections_to_upload)} detections ---")
         
         failed_detections = []
         
-        for payload in self.local_detections:
+        for payload in detections_to_upload:
            
             try:
                 # Reconstruct the function call EXACTLY as it was in the old working script.
@@ -198,17 +217,17 @@ class InferenceProcessor:
                 sys.stdout.flush()
                 failed_detections.append(payload)
                 
-        success_count = len(self.local_detections) - len(failed_detections)
+        success_count = len(detections_to_upload) - len(failed_detections)
         fail_count = len(failed_detections)
         
         print(f"--- ☁️ Batch upload complete. {success_count} successful, {fail_count} failed. ---\n")
         
         if fail_count > 0:
-            print(f"WARNING: {fail_count} uploads failed. Retrying them in the next batch.")
-            self.local_detections = failed_detections
+            print(f"WARNING: {fail_count} uploads failed. They will be re-queued for the next upload cycle.")
         else:
             print("All uploads successful. Clearing local detection cache.")
-            self.local_detections.clear()
+        
+        return failed_detections
 
     def create_and_upload_sanity_video(self, video_frames, fps=15):
         """Creates a video from a list of frames and uploads it."""
@@ -263,10 +282,8 @@ class InferenceProcessor:
     def shutdown(self):
         """Shutdown the processor, uploading any remaining detections."""
         print("\nShutting down processor...")
-        if self.enable_uploads and self.local_detections:
-            print("Uploading remaining detections before exit...")
-            self.upload_local_batch()
-            # Note: A final sanity video is not created on shutdown to keep it simple.
+        # The main loop now handles final uploads before calling shutdown.
+        # We can add any other final cleanup here if needed in the future.
         print("Shutdown complete.")
     
     def process_classification_results(self, classification_results, detection_data):
@@ -433,6 +450,46 @@ def initialize_camera():
     time.sleep(1)
     return picam2
 
+def uploader_worker(upload_queue, processor):
+    """A worker function to run in a separate thread, handling uploads."""
+    failed_detections_to_retry = []
+    print("Uploader worker started.")
+
+    while True:
+        try:
+            item = upload_queue.get()
+            if item is None:  # Sentinel value to signal thread to exit
+                print("Uploader worker received exit signal.")
+                # Before exiting, try one last time to upload any failed items
+                if failed_detections_to_retry:
+                    print(f"Attempting final upload for {len(failed_detections_to_retry)} previously failed detections.")
+                    processor.upload_local_batch(failed_detections_to_retry)
+                break
+
+            detections, video_frames, video_fps = item
+            
+            # Prepend failed detections from the previous run to the current batch
+            if failed_detections_to_retry:
+                print(f"Retrying {len(failed_detections_to_retry)} failed uploads from previous batch.")
+                detections = failed_detections_to_retry + detections
+                failed_detections_to_retry.clear()
+
+            # 1. Upload detections if any exist
+            if detections:
+                failed_detections_to_retry = processor.upload_local_batch(detections)
+            
+            # 2. Upload video if any frames were captured
+            if video_frames:
+                processor.create_and_upload_sanity_video(video_frames, fps=video_fps)
+
+        except Exception as e:
+            logger.error(f"Unhandled exception in uploader thread: {e}", exc_info=True)
+        finally:
+            # This is crucial to allow queue.join() to unblock
+            upload_queue.task_done()
+            
+    print("Uploader worker finished.")
+
 def run_realtime(enable_uploads=False, display=True, upload_interval=60, 
                  sanity_video_percent=0, device_id="test_pipeline2"):
     
@@ -441,13 +498,27 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
 
     processor = InferenceProcessor(enable_uploads=enable_uploads, device_id=device_id)
     picam2 = initialize_camera()
+
+    # --- Asynchronous Uploader Setup ---
+    upload_queue = None
+    uploader_thread = None
+    if enable_uploads:
+        upload_queue = queue.Queue()
+        uploader_thread = threading.Thread(
+            target=uploader_worker, 
+            args=(upload_queue, processor), 
+            daemon=True
+        )
+        uploader_thread.start()
     
     # --- State variables for the main loop ---
     last_upload_time = time.time()
     
-    # Variables for just-in-time video recording
+    # --- Double buffer for just-in-time video recording ---
+    video_buffers = {'A': [], 'B': []}
+    active_video_buffer_key = 'A'
+    
     is_recording = False
-    video_frames_buffer = []
     recording_start_time = -1
     recording_end_time = -1
 
@@ -482,36 +553,46 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
             current_time = time.time()
             time_since_last_upload = current_time - last_upload_time
 
-            # --- Batch Upload Logic ---
+            # --- Asynchronous Batch Upload Logic ---
             if enable_uploads and (time_since_last_upload >= upload_interval):
-                print(f"\n--- Upload interval of {upload_interval}s reached. Pausing detections to upload batch. ---")
-                processor.upload_local_batch()
-                if enable_sanity_video and video_frames_buffer:
+                print(f"\n--- Upload interval of {upload_interval}s reached. Offloading data for async upload. ---")
+                
+                # 1. Get the full detection buffer from the processor and swap to the new one
+                detections_to_upload = processor.get_full_buffer_and_swap()
+                
+                # 2. Swap video buffers and get the full one
+                video_to_upload = video_buffers[active_video_buffer_key]
+                video_buffers[active_video_buffer_key] = []  # Clear the now-inactive buffer
+                active_video_buffer_key = 'B' if active_video_buffer_key == 'A' else 'A'
+
+                target_fps = 15 # Default
+                if enable_sanity_video and video_to_upload:
                     # Calculate FPS to maintain the intended video duration
                     actual_clip_duration = recording_end_time - recording_start_time
-                    actual_processing_fps = len(video_frames_buffer) / actual_clip_duration if actual_clip_duration > 0 else 0
                     
                     # Set FPS so the video duration matches the recording time window
-                    # This ensures 10% time = 10% video duration, regardless of processing speed
-                    target_fps = len(video_frames_buffer) / actual_clip_duration if actual_clip_duration > 0 else 15
+                    target_fps = len(video_to_upload) / actual_clip_duration if actual_clip_duration > 0 else 15
+                    target_fps = max(5, min(target_fps, 30))  # Cap between 5-30 FPS
                     
-                    # But cap it at reasonable bounds for smooth playback
-                    target_fps = max(5, min(target_fps, 30))  # Between 5-30 FPS
-                    
-                    final_video_duration = len(video_frames_buffer) / target_fps
-                    print(f"📹 Video stats: {len(video_frames_buffer)} frames over {actual_clip_duration:.1f}s recording window")
-                    print(f"📹 Playback: {target_fps:.1f} FPS → {final_video_duration:.1f}s video duration")
-                    processor.create_and_upload_sanity_video(video_frames_buffer, fps=target_fps)
-                
-                # Clear buffers and schedule the next cycle
-                video_frames_buffer.clear()
+                    final_video_duration = len(video_to_upload) / target_fps
+                    print(f"📹 Assembling video: {len(video_to_upload)} frames from a {actual_clip_duration:.1f}s window.")
+                    print(f"📹 Target playback: {target_fps:.1f} FPS for a {final_video_duration:.1f}s video.")
+
+                # 3. Queue the data for the uploader thread
+                if detections_to_upload or video_to_upload:
+                    print(f"Queuing {len(detections_to_upload)} detections and {len(video_to_upload)} video frames for upload.")
+                    upload_queue.put((detections_to_upload, video_to_upload, target_fps))
+                else:
+                    print("No new detections or video frames to upload in this interval.")
+
+                # 4. Reset timers and schedule the next recording cycle
+                last_upload_time = time.time()
+                processor.frame_count = 0  # Reset frame count for the new interval
                 is_recording = False
                 if enable_sanity_video:
                     schedule_next_recording()
 
-                print("--- Resuming detections. ---")
-                last_upload_time = time.time()
-                processor.frame_count = 0
+                print("--- Resuming detections into new buffers. ---")
 
             frame = picam2.capture_array()
             
@@ -535,14 +616,14 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
                         is_recording = False
                         # Mark as done so we don't record again this interval
                         recording_start_time = -1 
-                        print(f"🎬 Finished recording. Captured {len(video_frames_buffer)} frames.\n")
+                        print(f"🎬 Finished recording. Captured {len(video_buffers[active_video_buffer_key])} frames.\n")
 
             # Process frame (only with full visualization if recording or displaying)
             processed_frame = processor.process_frame(frame, show_boxes=(display or should_record_this_frame))
             
-            # Record frame if needed
+            # Record frame if needed, into the currently active buffer
             if should_record_this_frame:
-                video_frames_buffer.append(processed_frame.copy())
+                video_buffers[active_video_buffer_key].append(processed_frame.copy())
 
             if display:
                 cv2.imshow("Real-time Inference", processed_frame)
@@ -552,10 +633,32 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
     except KeyboardInterrupt:
         print("Interrupted by user")
     finally:
+        # --- Graceful Shutdown ---
+        print("\n--- Initiating shutdown sequence... ---")
+        
+        # Final upload of any remaining data
+        if enable_uploads and upload_queue is not None:
+            print("Queueing final batch of data before exit...")
+            # Get any remaining data from the currently active buffers
+            final_detections = processor.get_full_buffer_and_swap()
+            final_video = video_buffers[active_video_buffer_key]
+            
+            if final_detections or final_video:
+                # Use default FPS for final video chunk
+                upload_queue.put((final_detections, final_video, 15))
+            
+            # Signal the uploader to finish its queue and exit
+            print("Waiting for all pending uploads to complete...")
+            upload_queue.put(None)  # Sentinel to stop the worker
+            upload_queue.join()     # Wait for all items to be processed
+            uploader_thread.join()  # Wait for the thread to terminate
+            print("All uploads finished.")
+
         processor.shutdown()
         if display:
             cv2.destroyAllWindows()
         picam2.stop()
+        print("--- Shutdown complete. ---")
 
 def main():
     parser = argparse.ArgumentParser(description='Real-time two-stage inference processor for insect tracking.')
