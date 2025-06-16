@@ -431,9 +431,9 @@ class InferenceProcessor:
                 self.draw_classification_labels(bgr_frame, x, y2, detection_data)
             
             timestamp = datetime.now().isoformat()
-            # OPTIMIZATION: Store the small cropped region, not the entire large frame.
-            # This dramatically reduces CPU usage in the main processing thread.
-            self.store_detection_locally(cropped_region, detection_data, timestamp)
+            # REVERTED: Store the full frame for context, not the small cropped region.
+            # This increases CPU usage but provides full context for each detection.
+            self.store_detection_locally(bgr_frame, detection_data, timestamp)
         
         # Simplified summary message for performance
         if not show_boxes and len(valid_detection_data) > 0:
