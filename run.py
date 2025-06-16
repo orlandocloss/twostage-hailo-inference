@@ -443,13 +443,17 @@ class InferenceProcessor:
         
         return bgr_frame
 
-def initialize_camera():
+def initialize_camera(fps=30):
     picam2 = Picamera2()
+    # Request a higher framerate from the camera
     camera_config = picam2.create_preview_configuration(main={"format": 'RGB888', "size": (1080, 1080)})
-    picam2.set_controls({"AfMode": 0, "LensPosition": 0.0})
     picam2.configure(camera_config)
+    # Set controls after configuration for higher FPS
+    picam2.set_controls({"FrameRate": float(fps), "AfMode": 0, "LensPosition": 0.0})
     picam2.start()
-    time.sleep(1)
+    # Allow more time for the camera to stabilize with new settings
+    print(f"Waiting for camera to stabilize at {fps} FPS...")
+    time.sleep(2)
     return picam2
 
 def uploader_worker(upload_queue, processor):
@@ -493,13 +497,40 @@ def uploader_worker(upload_queue, processor):
     print("Uploader worker finished.")
 
 def run_realtime(enable_uploads=False, display=True, upload_interval=60, 
-                 sanity_video_percent=0, device_id="test_pipeline2"):
+                 sanity_video_percent=0, device_id="test_pipeline2", fps=30):
     
     # The feature is enabled if the user provides a percentage greater than 0.
     enable_sanity_video = sanity_video_percent > 0
 
     processor = InferenceProcessor(enable_uploads=enable_uploads, device_id=device_id)
-    picam2 = initialize_camera()
+    picam2 = initialize_camera(fps=fps)
+
+    # --- Frame Grabber Thread for Maximum FPS ---
+    latest_frame = None
+    frame_lock = threading.Lock()
+    stop_event = threading.Event()
+
+    def frame_grabber_worker(picam2, stop_event):
+        nonlocal latest_frame
+        print("Frame grabber worker started.")
+        while not stop_event.is_set():
+            try:
+                frame = picam2.capture_array()
+                with frame_lock:
+                    latest_frame = frame
+            except Exception as e:
+                # This can happen if the camera is stopped during shutdown
+                if not stop_event.is_set():
+                    logger.error(f"Error in frame grabber: {e}")
+                break
+        print("Frame grabber worker finished.")
+
+    frame_grabber_thread = threading.Thread(
+        target=frame_grabber_worker, 
+        args=(picam2, stop_event),
+        daemon=True
+    )
+    frame_grabber_thread.start()
 
     # --- Asynchronous Uploader Setup ---
     upload_queue = None
@@ -550,8 +581,22 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
     if enable_sanity_video:
         schedule_next_recording()
 
+    # Wait for the first frame to be captured by the grabber thread
+    print("Waiting for first frame from camera...")
+    while latest_frame is None:
+        if not frame_grabber_thread.is_alive():
+            raise RuntimeError("Frame grabber thread died unexpectedly.")
+        time.sleep(0.1)
+    print("First frame received. Starting main processing loop.")
+
     try:
         while True:
+            with frame_lock:
+                if latest_frame is None:
+                    continue # Should not happen after initial wait
+                # Make a copy to work on, releasing the lock quickly
+                frame = latest_frame.copy()
+
             current_time = time.time()
             time_since_last_upload = current_time - last_upload_time
 
@@ -612,11 +657,6 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
 
                 print("--- Resuming detections into new buffers. ---")
 
-            frame = picam2.capture_array()
-            
-            if frame is None or frame.size == 0:
-                continue
-
             # --- Just-in-Time Recording Logic (check BEFORE processing for efficiency) ---
             should_record_this_frame = False
             if enable_sanity_video and recording_start_time != -1:
@@ -659,14 +699,20 @@ def run_realtime(enable_uploads=False, display=True, upload_interval=60,
         # --- Graceful Shutdown ---
         print("\n--- Initiating shutdown sequence... ---")
         
-        # 1. Stop hardware and UI first to prevent crashes on Ctrl+C.
+        # 1. Stop the frame grabber thread first to halt camera access.
+        print("Stopping frame grabber...")
+        stop_event.set()
+        if frame_grabber_thread.is_alive():
+            frame_grabber_thread.join()
+
+        # 2. Stop hardware and UI first to prevent crashes on Ctrl+C.
         print("Stopping camera...")
         picam2.stop()
         if display:
             print("Closing display windows...")
             cv2.destroyAllWindows()
 
-        # 2. Handle final uploads now that hardware is safe.
+        # 3. Handle final uploads now that hardware is safe.
         if enable_uploads and upload_queue is not None and uploader_thread.is_alive():
             print("Queueing final batch of data before exit...")
             # Get any remaining data from the currently active buffers
@@ -700,6 +746,8 @@ def main():
                         help='Enables sanity video. Set to a percentage of interval time (e.g., 10). Default: 0 (disabled).')
     parser.add_argument('--device-id', type=str, default='test_pipeline2',
                         help='Device ID for uploads and identification. Default: test_pipeline2')
+    parser.add_argument('--fps', type=int, default=30,
+                        help='Target camera FPS. Affects performance. Default: 30')
     
     args = parser.parse_args()
     
@@ -708,7 +756,8 @@ def main():
         display=args.display, 
         upload_interval=args.upload_interval,
         sanity_video_percent=args.sanity_video_percent,
-        device_id=args.device_id
+        device_id=args.device_id,
+        fps=args.fps
     )
 
 if __name__ == "__main__":
