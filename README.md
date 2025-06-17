@@ -25,6 +25,52 @@ twostage-hailo-inference/
 └── .env                     # Environment variables (create this)
 ```
 
+## Asynchronous Architecture
+
+The system is designed with a multi-threaded architecture to ensure real-time performance by handling different tasks concurrently.
+
+- **Frame Grabber Thread**: A dedicated thread's only job is to communicate with the camera. It continuously captures frames and places them into a `frame_queue`. If sanity video recording is active, it also copies these frames into a separate `video_buffer`. This ensures that the main application always has the latest frame available without waiting for the camera hardware.
+
+- **Main Processing Thread**: This is the central coordinator. It runs in the main thread and performs the following tasks:
+    - Takes a frame from the `frame_queue`.
+    - Runs the computationally-heavy object detection and classification models on the frame.
+    - Once every `upload_interval`, it hands off the collected detection data and video frames to the uploader thread.
+
+- **Uploader Thread**: Another dedicated thread handles all slow I/O operations. It waits for data to appear in the `uploader_queue`. When the main thread provides a batch of data, this uploader thread:
+    - Encodes the buffered frames into a .mp4 video file.
+    - Uploads the detection data and the newly created video file over the network.
+
+This asynchronous, multi-threaded design is crucial. It prevents the high-latency tasks of video encoding and network uploads from blocking the main processing loop, allowing the system to keep up with the camera's frame rate without dropping frames.
+
+```mermaid
+graph TD
+    subgraph "Frame Grabber Thread"
+        direction LR
+        A[Camera Hardware] -->|Captures Frame| B(Frame Grabber Worker)
+        B -->|Puts Frame into Queue| C[frame_queue]
+        B -->|Copies Frame if Recording| D[video_buffers]
+    end
+
+    subgraph "Main Processing Thread"
+        direction LR
+        C -->|Gets Frame| E(Main Processing Loop)
+        E -->|Runs Inference| F[Object Detection<br/>& Classification]
+        F -->|Stores Result| G[detection_buffers]
+        E -->|Every 'upload_interval'| H{Swap Buffers &<br/>Queue for Upload}
+        H -- Detections & Video Frames --> I[uploader_queue]
+    end
+
+    subgraph "Uploader Thread"
+        direction LR
+        I -->|Gets Data| J(Uploader Worker)
+        J -->|Creates Video & Uploads| K[Network I/O &<br/>File Encoding]
+        K --> L[Cloud API]
+    end
+
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style L fill:#ccf,stroke:#333,stroke-width:2px
+```
+
 ## Available Commands
 
 ### Real-time Inference (Camera Mode)

@@ -523,6 +523,8 @@ class CameraStreamer:
         # Threading and state management
         self.stop_event = threading.Event()
         self.video_lock = threading.Lock()
+        self.video_capture_start_time = 0.0
+        self.last_video_actual_fps = float(self.fps)
 
         # Uploader thread
         self.uploader_queue = None
@@ -573,7 +575,16 @@ class CameraStreamer:
                         
                         if len(current_buffer) >= self.target_frame_count:
                             self.is_recording = False
-                            print(f"🎬 Collected {self.target_frame_count} frames. Recording stopped by grabber.")
+                            # NEW: Calculate and store the actual FPS
+                            capture_duration = time.time() - self.video_capture_start_time
+                            if capture_duration > 0:
+                                actual_fps = len(current_buffer) / capture_duration
+                                self.last_video_actual_fps = actual_fps
+                                print(f"🎬 Collected {len(current_buffer)} frames in {capture_duration:.2f}s. Actual FPS: {actual_fps:.2f}. Recording stopped.")
+                            else:
+                                # Fallback to target FPS if duration is zero, though this is unlikely
+                                self.last_video_actual_fps = float(self.fps)
+                                print(f"🎬 Collected {len(current_buffer)} frames. Could not calculate actual FPS, falling back to target {self.fps} FPS.")
 
             except Exception as e:
                 if not self.stop_event.is_set():
@@ -623,16 +634,16 @@ class CameraStreamer:
                     self.video_buffers[self.active_video_buffer_key] = []
                     self.active_video_buffer_key = 'B' if self.active_video_buffer_key == 'A' else 'A'
 
-                # The FPS is now constant, based on the user's setting.
-                target_fps = self.fps
+                # Use the measured FPS for the video.
+                video_fps = self.last_video_actual_fps
                 if self.sanity_video_percent > 0 and video_to_upload:
-                    final_video_duration = len(video_to_upload) / target_fps if target_fps > 0 else 0
+                    final_video_duration = len(video_to_upload) / video_fps if video_fps > 0 else 0
                     print(f"📹 Assembling video: {len(video_to_upload)} frames captured.")
-                    print(f"📹 Playback: {final_video_duration:.2f}s video at a constant {target_fps:.1f} FPS.")
+                    print(f"📹 Playback: {final_video_duration:.2f}s video at a measured {video_fps:.1f} FPS.")
 
                 if detections_to_upload or video_to_upload:
                     print(f"Queuing {len(detections_to_upload)} detections and {len(video_to_upload)} video frames for upload.")
-                    self.uploader_queue.put((detections_to_upload, video_to_upload, target_fps))
+                    self.uploader_queue.put((detections_to_upload, video_to_upload, video_fps))
                 else:
                     print("No new detections or video frames to upload in this interval.")
 
@@ -649,6 +660,7 @@ class CameraStreamer:
                 with self.video_lock:
                     if not self.is_recording and time_into_interval >= self.recording_start_time:
                         self.is_recording = True
+                        self.video_capture_start_time = time.time()
                         # Prevent re-triggering this recording session.
                         self.recording_start_time = -1
                         print(f"\n🎬 Recording signal sent to grabber. Will collect {self.target_frame_count} frames.")
