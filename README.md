@@ -44,29 +44,28 @@ This asynchronous, multi-threaded design is crucial. It prevents the high-latenc
 
 ```mermaid
 graph TD
-    subgraph "Thread 1: Frame Grabber"
-        direction TB
-        Cam([Camera]) --> T1(Capture Frames);
-        T1 --> FQ{{Frame Queue}};
-        T1 --> SVB{{Sanity Video Buffer}};
+    subgraph "Parallel Threads Running Concurrently"
+        subgraph "Thread 1: Frame Grabber"
+            Cam([Camera]) --> T1(Capture Frames)
+            T1 --> FQ{{Frame Queue}}
+            T1 --> SVB{{Sanity Video Buffer}}
+        end
+
+        subgraph "Thread 2: Main Processing"
+            T2("Detect, Crop, Classify")
+            FQ --> T2
+            T2 --> DB{{Detections}}
+        end
+        
+        subgraph "Thread 3: Uploader"
+            T3(Encode & Upload)
+            UQ{{Upload Queue}} --> T3
+            T3 --> Cloud((Cloud API))
+        end
     end
 
-    subgraph "Thread 2: Main Processing"
-        direction TB
-        T2("Detect, Crop, Classify");
-        FQ --> T2;
-        T2 --> DB{{Detections}};
-    end
-    
-    subgraph "Thread 3: Uploader"
-        direction TB
-        T3(Encode & Upload);
-        UQ{{Upload Queue}} --> T3;
-        T3 --> Cloud((Cloud API));
-    end
-
-    DB --> UQ;
-    SVB --> UQ;
+    DB --> UQ
+    SVB --> UQ
 ```
 
 ## Available Commands
