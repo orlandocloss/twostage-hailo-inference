@@ -43,30 +43,34 @@ The system is designed with a multi-threaded architecture to ensure real-time pe
 This asynchronous, multi-threaded design is crucial. It prevents the high-latency tasks of video encoding and network uploads from blocking the main processing loop, allowing the system to keep up with the camera's frame rate without dropping frames.
 
 ```mermaid
-graph LR
-    subgraph "Thread 1: Frame Grabber"
-        direction TB
-        Cam([Camera]) --> T1(Capture)
-        T1 --> FQ[(Frames)]
-        T1 --> VB[(Video)]
+graph TD
+    subgraph "Parallel Threads Running Concurrently"
+        direction LR
+        
+        subgraph "Thread 1: Frame Grabber"
+            direction TB
+            Cam([Camera]) --> T1(Capture Frames);
+            T1 --> FQ{{Frame Queue}};
+            T1 --> SVB{{Sanity Video Buffer}};
+        end
+
+        subgraph "Thread 2: Main Processing"
+            direction TB
+            T2("Detect, Crop, Classify");
+            FQ --> T2;
+            T2 --> DB{{Detections}};
+        end
+        
+        subgraph "Thread 3: Uploader"
+            direction TB
+            T3(Encode & Upload);
+            UQ{{Upload Queue}} --> T3;
+            T3 --> Cloud((Cloud API));
+        end
     end
 
-    subgraph "Thread 2: Main Processing"
-        direction TB
-        T2(Process & Infer)
-        FQ --> T2
-        T2 --> DB[(Detections)]
-    end
-    
-    subgraph "Thread 3: Uploader"
-        direction TB
-        T3(Encode & Upload)
-        UQ[(Upload Queue)] --> T3
-        T3 --> Cloud((Cloud API))
-    end
-
-    DB --> UQ
-    VB --> UQ
+    DB --> UQ;
+    SVB --> UQ;
 ```
 
 ## Available Commands
