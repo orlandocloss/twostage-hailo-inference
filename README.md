@@ -44,7 +44,7 @@ This asynchronous, multi-threaded design is crucial. It prevents the high-latenc
 
 ```mermaid
 graph TD
-    subgraph "Parallel Threads Running Concurrently"
+    subgraph "Parallel Threads"
         subgraph "Thread 1: Frame Grabber"
             Cam([Camera]) --> T1(Capture Frames)
             T1 --> FQ{{Frame Queue}}
