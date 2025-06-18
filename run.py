@@ -524,7 +524,6 @@ class CameraStreamer:
         self.stop_event = threading.Event()
         self.video_lock = threading.Lock()
         self.video_capture_start_time = 0.0
-        self.last_video_actual_fps = float(self.fps)
 
         # Uploader thread
         self.uploader_queue = None
@@ -542,8 +541,6 @@ class CameraStreamer:
         self.video_buffers = {'A': [], 'B': []}
         self.active_video_buffer_key = 'A'
         self.is_recording = False
-        # NEW: List to store timestamps for accurate FPS calculation
-        self.video_frame_timestamps = []
         self.frame_grabber_thread = threading.Thread(
             target=self._frame_grabber_worker,
             daemon=True
@@ -574,28 +571,10 @@ class CameraStreamer:
                         # once the target number of frames has been collected.
                         if len(current_buffer) < self.target_frame_count:
                             current_buffer.append(frame.copy())
-                            self.video_frame_timestamps.append(time.time())
                         
                         if len(current_buffer) >= self.target_frame_count:
                             self.is_recording = False
-                            # NEW: Calculate FPS from the collected timestamps for accuracy.
-                            if len(self.video_frame_timestamps) > 1:
-                                total_duration = self.video_frame_timestamps[-1] - self.video_frame_timestamps[0]
-                                num_intervals = len(self.video_frame_timestamps) - 1
-                                if total_duration > 0:
-                                    actual_fps = num_intervals / total_duration
-                                    self.last_video_actual_fps = actual_fps
-                                    print(f"🎬 Collected {len(current_buffer)} frames. Calculated FPS from timestamps: {actual_fps:.2f}. Recording stopped.")
-                                else:
-                                    self.last_video_actual_fps = float(self.fps)
-                                    print(f"🎬 Collected {len(current_buffer)} frames, but duration was zero. Falling back to target {self.fps} FPS.")
-                            else:
-                                # Fallback if not enough timestamps were collected
-                                self.last_video_actual_fps = float(self.fps)
-                                print(f"🎬 Collected {len(current_buffer)} frames. Could not calculate FPS from timestamps, falling back to target {self.fps} FPS.")
-                            
-                            # Clear the timestamps for the next recording session
-                            self.video_frame_timestamps.clear()
+                            print(f"🎬 Collected {len(current_buffer)} frames. Recording stopped.")
 
             except Exception as e:
                 if not self.stop_event.is_set():
@@ -641,18 +620,17 @@ class CameraStreamer:
                 detections_to_upload = self.processor.get_full_buffer_and_swap()
                 
                 video_to_upload = []
-                video_fps = float(self.fps) # Default to target FPS
                 with self.video_lock:
                     video_to_upload = self.video_buffers[self.active_video_buffer_key]
                     self.video_buffers[self.active_video_buffer_key] = []
                     self.active_video_buffer_key = 'B' if self.active_video_buffer_key == 'A' else 'A'
-                    # Safely read the last measured FPS. This is critical for correct playback speed.
-                    video_fps = self.last_video_actual_fps
 
+                # Use the camera's configured FPS directly - this is the actual frame capture rate
+                video_fps = float(self.fps)
                 if self.sanity_video_percent > 0 and video_to_upload:
                     final_video_duration = len(video_to_upload) / video_fps if video_fps > 0 else 0
                     print(f"📹 Assembling video: {len(video_to_upload)} frames captured.")
-                    print(f"📹 Playback: {final_video_duration:.2f}s video at a measured {video_fps:.1f} FPS.")
+                    print(f"📹 Playback: {final_video_duration:.2f}s video at camera's configured {video_fps:.1f} FPS.")
 
                 if detections_to_upload or video_to_upload:
                     print(f"Queuing {len(detections_to_upload)} detections and {len(video_to_upload)} video frames for upload.")
