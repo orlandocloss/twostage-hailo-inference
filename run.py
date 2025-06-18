@@ -554,6 +554,9 @@ class CameraStreamer:
         self.last_upload_time = time.time()
         self.recording_start_time = -1
         self.target_frame_count = 0
+        # Main loop FPS tracking
+        self.main_loop_frame_times = []
+        self.last_main_loop_fps_report = 0
         if self.sanity_video_percent > 0:
             self._schedule_next_recording()
 
@@ -628,6 +631,9 @@ class CameraStreamer:
 
     def _main_processing_loop(self):
         """The main loop that pulls frames from the queue and processes them."""
+        frame_skip_counter = 0
+        process_every_nth_frame = 3  # Process every 3rd frame to speed up the loop
+        
         while not self.stop_event.is_set():
             try:
                 frame = self.frame_queue.get(timeout=1.0)
@@ -638,7 +644,21 @@ class CameraStreamer:
                 print("No frame in queue for 1 second, continuing...")
                 continue
 
+            # Track main loop FPS
             current_time = time.time()
+            self.main_loop_frame_times.append(current_time)
+            if len(self.main_loop_frame_times) > 100:
+                self.main_loop_frame_times.pop(0)
+            
+            # Report main loop FPS every 10 seconds
+            if current_time - self.last_main_loop_fps_report >= 10.0 and len(self.main_loop_frame_times) > 1:
+                time_span = self.main_loop_frame_times[-1] - self.main_loop_frame_times[0]
+                if time_span > 0:
+                    main_loop_fps = (len(self.main_loop_frame_times) - 1) / time_span
+                    queue_size = self.frame_queue.qsize()
+                    print(f"🔄 Main loop FPS: {main_loop_fps:.2f}, Queue size: {queue_size}")
+                self.last_main_loop_fps_report = current_time
+
             time_since_last_upload = current_time - self.last_upload_time
 
             # --- Asynchronous Batch Upload Logic ---
@@ -684,14 +704,26 @@ class CameraStreamer:
                         self.recording_start_time = -1
                         print(f"\n🎬 Recording signal sent to grabber. Will collect {self.target_frame_count} frames.")
             
-            # --- Frame Processing and Display ---
-            if self.display:
-                processed_frame = self.processor.process_frame(frame, show_boxes=True)
-                cv2.imshow("Real-time Inference", processed_frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+            # --- Frame Processing (Skip frames to speed up loop) ---
+            frame_skip_counter += 1
+            should_process = frame_skip_counter >= process_every_nth_frame
+            
+            if should_process:
+                frame_skip_counter = 0  # Reset counter
+                
+                if self.display:
+                    processed_frame = self.processor.process_frame(frame, show_boxes=True)
+                    cv2.imshow("Real-time Inference", processed_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                else:
+                    self.processor.process_frame(frame, show_boxes=False)
             else:
-                self.processor.process_frame(frame, show_boxes=False)
+                # Skip heavy processing but still check for quit key if displaying
+                if self.display:
+                    cv2.imshow("Real-time Inference", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
 
     def start(self):
         """Starts all worker threads and the main processing loop."""
