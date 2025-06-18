@@ -51,8 +51,7 @@ class VideoInferenceProcessor:
         # Store all detections for batch upload
         self.all_detections = []
         
-        # Initialize tracker (will be set up when we know frame dimensions)
-        self.tracker = None
+        # Per-video frame count for logging/timestamps
         self.frame_count = 0
         
         self.det_utils = ObjectDetectionUtils(labels_path)
@@ -167,17 +166,10 @@ class VideoInferenceProcessor:
         
         return detection_data
     
-    def process_frame(self, frame, frame_time_seconds, show_boxes=False):
+    def process_frame(self, frame, frame_time_seconds, tracker, global_frame_count, show_boxes=False):
         """Process a single frame from the video."""
-        # Increment frame counter
+        # Increment per-video frame counter for logging
         self.frame_count += 1
-        
-        # Initialize tracker on first frame
-        if self.tracker is None:
-            height, width = frame.shape[:2]
-            self.tracker = InsectTracker(height, width, max_frames=30, w_dist=0.7, w_area=0.3, 
-                                       cost_threshold=0.8)
-            print(f"Initialized tracker for {width}x{height} frame")
         
         # Convert BGR to RGB for inference
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -227,11 +219,11 @@ class VideoInferenceProcessor:
                     'confidence': confidence
                 })
         
-        # Update tracker with detections
-        track_ids = self.tracker.update(valid_detections, self.frame_count)
+        # Update tracker with detections using the global frame count
+        track_ids = tracker.update(valid_detections, global_frame_count)
         
         if show_boxes and len(valid_detections) > 0:
-            print(f"Frame {self.frame_count}: {len(valid_detections)} detections → {len(self.tracker.current_tracks)} active tracks")
+            print(f"Frame {self.frame_count}: {len(valid_detections)} detections → {len(tracker.current_tracks)} active tracks")
         
         # Process each detection with its track ID
         for i, det_data in enumerate(valid_detection_data):
@@ -277,7 +269,7 @@ class VideoInferenceProcessor:
         
         return frame
 
-def process_video(video_path, processor, show_video=False, output_video_path=None):
+def process_video(video_path, processor, tracker, start_frame_count, show_video=False, output_video_path=None):
     """Process an MP4 video file frame by frame."""
     
     if not os.path.exists(video_path):
@@ -315,8 +307,9 @@ def process_video(video_path, processor, show_video=False, output_video_path=Non
             
             frame_time_seconds = frame_number / fps if fps > 0 else 0
             
-            # Process the frame
-            processed_frame = processor.process_frame(frame, frame_time_seconds, show_boxes=show_video)
+            # Process the frame, passing the shared tracker and the correct global frame count
+            global_frame_for_this_video = start_frame_count + frame_number
+            processed_frame = processor.process_frame(frame, frame_time_seconds, tracker, global_frame_for_this_video, show_boxes=show_video)
             
             # Write to output video if requested
             if out:
@@ -351,4 +344,5 @@ def process_video(video_path, processor, show_video=False, output_video_path=Non
     print(f"\nProcessing complete!")
     print(f"Processed {frame_number} frames in {processing_time:.2f}s")
     print(f"Average processing speed: {frame_number/processing_time:.2f} FPS")
-    print(f"Total detections found: {len(processor.all_detections)}") 
+    print(f"Total detections found: {len(processor.all_detections)}")
+    return frame_number 

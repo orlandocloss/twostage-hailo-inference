@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from main.record_video import VideoRecorder
 from main.inference_from_video import VideoInferenceProcessor, process_video
 from sensing_garden_client import SensingGardenClient
+from models.insect_tracker import InsectTracker
 
 # Load environment variables
 load_dotenv()
@@ -35,10 +36,15 @@ class ContinuousPipeline:
         self.device_id = device_id
         self.enable_uploads = enable_uploads
         self.confidence_threshold = confidence_threshold
+        self.resolution = resolution
         
         # Threading controls
         self.stop_event = threading.Event()
         self.video_queue = queue.Queue()
+
+        # --- Centralized State Management ---
+        self.global_frame_count = 0
+        self.tracker = None
         
         # --- Centralized Taxonomy Initialization ---
         logger.info("Initializing taxonomy...")
@@ -48,6 +54,16 @@ class ContinuousPipeline:
             logger.info("✅ Taxonomy initialized successfully.")
         except Exception as e:
             logger.error(f"❌ Failed to initialize taxonomy: {e}. Exiting.")
+            raise
+        
+        # --- Centralized Tracker Initialization ---
+        logger.info("Initializing insect tracker...")
+        try:
+            width, height = self.resolution
+            self.tracker = InsectTracker(height, width, max_frames=30, w_dist=0.7, w_area=0.3, cost_threshold=0.8)
+            logger.info("✅ Insect tracker initialized successfully.")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize insect tracker: {e}. Exiting.")
             raise
         
         # Initialize components
@@ -128,8 +144,7 @@ class ContinuousPipeline:
                 logger.info(f"--- Processing Video: {video_path.name} ---")
                 
                 self.run_inference_on_video(video_path)
-                if self.should_upload_video():
-                    self.upload_video_file(video_path)
+                self.upload_video_file(video_path)
                 self.delete_video(video_path)
                 
                 self.video_queue.task_done()
@@ -159,7 +174,13 @@ class ContinuousPipeline:
                 device_id=self.device_id,
                 confidence_threshold=self.confidence_threshold
             )
-            process_video(video_path=str(video_path), processor=processor)
+            frames_processed = process_video(
+                video_path=str(video_path), 
+                processor=processor,
+                tracker=self.tracker,
+                start_frame_count=self.global_frame_count
+            )
+            self.global_frame_count += frames_processed
             
             if self.enable_uploads:
                 processor.upload_all_detections()
