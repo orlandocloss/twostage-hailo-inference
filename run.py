@@ -448,15 +448,27 @@ class InferenceProcessor:
 
 def initialize_camera(fps=30):
     picam2 = Picamera2()
-    # Request a higher framerate from the camera
-    camera_config = picam2.create_preview_configuration(main={"format": 'RGB888', "size": (1080, 1080)})
+    # Request a higher framerate from the camera with optimized settings
+    camera_config = picam2.create_preview_configuration(
+        main={"format": 'RGB888', "size": (1080, 1080)},
+        # Add buffer count for better performance
+        buffer_count=4
+    )
     picam2.configure(camera_config)
-    # Set controls after configuration for higher FPS
-    picam2.set_controls({"FrameRate": float(fps), "AfMode": 0, "LensPosition": 0.0})
+    # Set controls after configuration for higher FPS with optimizations
+    picam2.set_controls({
+        "FrameRate": float(fps), 
+        "AfMode": 0,  # Disable autofocus for speed
+        "LensPosition": 0.0,
+        "AeEnable": False,  # Disable auto-exposure for consistent timing
+        "AwbEnable": False,  # Disable auto white balance for speed
+        "ExposureTime": 10000,  # Fixed exposure (10ms)
+        "AnalogueGain": 1.0  # Fixed gain
+    })
     picam2.start()
     # Allow more time for the camera to stabilize with new settings
-    print(f"Waiting for camera to stabilize at {fps} FPS...")
-    time.sleep(2)
+    print(f"Waiting for camera to stabilize at {fps} FPS with optimized settings...")
+    time.sleep(3)
     return picam2
 
 def uploader_worker(upload_queue, processor):
@@ -566,14 +578,24 @@ class CameraStreamer:
         Also handles real-time video recording to prevent frame drops.
         """
         print("Frame grabber worker started.")
+        frame_capture_times = []
+        
         while not self.stop_event.is_set():
             try:
-                frame_start_time = time.time()
+                capture_start = time.time()
                 frame = self.picam2.capture_array()
+                capture_end = time.time()
+                
+                # Track camera capture time for diagnostics
+                frame_capture_times.append(capture_end - capture_start)
+                if len(frame_capture_times) > 50:
+                    frame_capture_times.pop(0)
+                
+                frame_start_time = time.time()
                 
                 # Try to put frame in queue, with timeout to avoid blocking
                 try:
-                    self.frame_queue.put(frame, timeout=0.1)
+                    self.frame_queue.put(frame, timeout=0.01)  # Reduced timeout for faster response
                 except queue.Full:
                     print(f"⚠️  Frame queue full! Main loop is too slow. Queue size: {self.frame_queue.qsize()}")
                     # Skip this frame to keep grabber running
@@ -591,14 +613,19 @@ class CameraStreamer:
                     if time_span > 0:
                         actual_fps = (len(self.frame_times) - 1) / time_span
                         self.measured_fps = actual_fps  # Store for video encoding
+                        
+                        # Calculate average camera capture time
+                        avg_capture_time = sum(frame_capture_times) / len(frame_capture_times) if frame_capture_times else 0
+                        max_theoretical_fps = 1.0 / avg_capture_time if avg_capture_time > 0 else 0
+                        
                         print(f"🎯 Frame grabber actual FPS: {actual_fps:.2f} (configured: {self.fps})")
+                        print(f"📸 Camera capture time: {avg_capture_time*1000:.1f}ms (max theoretical FPS: {max_theoretical_fps:.1f})")
                     self.last_fps_report_time = frame_start_time
 
+                # Video recording with minimal overhead
                 with self.video_lock:
                     if self.is_recording:
                         current_buffer = self.video_buffers[self.active_video_buffer_key]
-                        # The grabber is now responsible for stopping the recording
-                        # once the target number of frames has been collected.
                         if len(current_buffer) < self.target_frame_count:
                             current_buffer.append(frame.copy())
                         
