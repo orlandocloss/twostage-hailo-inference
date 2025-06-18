@@ -537,13 +537,14 @@ class CameraStreamer:
             )
 
         # Frame grabber thread and its shared state
-        self.frame_queue = queue.Queue(maxsize=self.fps * 2)
+        self.frame_queue = queue.Queue(maxsize=self.fps * 10)  # Much larger buffer to prevent blocking
         self.video_buffers = {'A': [], 'B': []}
         self.active_video_buffer_key = 'A'
         self.is_recording = False
         # FPS measurement for debugging
         self.frame_times = []
         self.last_fps_report_time = 0
+        self.measured_fps = float(self.fps)  # Store the actual measured FPS
         self.frame_grabber_thread = threading.Thread(
             target=self._frame_grabber_worker,
             daemon=True
@@ -566,7 +567,14 @@ class CameraStreamer:
             try:
                 frame_start_time = time.time()
                 frame = self.picam2.capture_array()
-                self.frame_queue.put(frame)
+                
+                # Try to put frame in queue, with timeout to avoid blocking
+                try:
+                    self.frame_queue.put(frame, timeout=0.1)
+                except queue.Full:
+                    print(f"⚠️  Frame queue full! Main loop is too slow. Queue size: {self.frame_queue.qsize()}")
+                    # Skip this frame to keep grabber running
+                    continue
                 
                 # FPS measurement for debugging
                 self.frame_times.append(frame_start_time)
@@ -579,6 +587,7 @@ class CameraStreamer:
                     time_span = self.frame_times[-1] - self.frame_times[0]
                     if time_span > 0:
                         actual_fps = (len(self.frame_times) - 1) / time_span
+                        self.measured_fps = actual_fps  # Store for video encoding
                         print(f"🎯 Frame grabber actual FPS: {actual_fps:.2f} (configured: {self.fps})")
                     self.last_fps_report_time = frame_start_time
 
@@ -643,13 +652,13 @@ class CameraStreamer:
                     self.video_buffers[self.active_video_buffer_key] = []
                     self.active_video_buffer_key = 'B' if self.active_video_buffer_key == 'A' else 'A'
 
-                # Use the camera's configured FPS directly - this is the actual frame capture rate
-                video_fps = float(self.fps)
+                # Use the measured FPS from frame grabber for accurate video encoding
+                video_fps = self.measured_fps
                 if self.sanity_video_percent > 0 and video_to_upload:
                     final_video_duration = len(video_to_upload) / video_fps if video_fps > 0 else 0
                     print(f"📹 Assembling video: {len(video_to_upload)} frames captured.")
-                    print(f"📹 Playback: {final_video_duration:.2f}s video at camera's configured {video_fps:.1f} FPS.")
-                    print(f"📹 DEBUG: Using {video_fps} FPS for video encoding (configured camera FPS: {self.fps})")
+                    print(f"📹 Playback: {final_video_duration:.2f}s video at measured {video_fps:.2f} FPS.")
+                    print(f"📹 DEBUG: Using measured {video_fps:.2f} FPS for video encoding (configured camera FPS: {self.fps})")
 
                 if detections_to_upload or video_to_upload:
                     print(f"Queuing {len(detections_to_upload)} detections and {len(video_to_upload)} video frames for upload.")
