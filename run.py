@@ -542,6 +542,8 @@ class CameraStreamer:
         self.video_buffers = {'A': [], 'B': []}
         self.active_video_buffer_key = 'A'
         self.is_recording = False
+        # NEW: List to store timestamps for accurate FPS calculation
+        self.video_frame_timestamps = []
         self.frame_grabber_thread = threading.Thread(
             target=self._frame_grabber_worker,
             daemon=True
@@ -572,19 +574,28 @@ class CameraStreamer:
                         # once the target number of frames has been collected.
                         if len(current_buffer) < self.target_frame_count:
                             current_buffer.append(frame.copy())
+                            self.video_frame_timestamps.append(time.time())
                         
                         if len(current_buffer) >= self.target_frame_count:
                             self.is_recording = False
-                            # NEW: Calculate and store the actual FPS
-                            capture_duration = time.time() - self.video_capture_start_time
-                            if capture_duration > 0:
-                                actual_fps = len(current_buffer) / capture_duration
-                                self.last_video_actual_fps = actual_fps
-                                print(f"🎬 Collected {len(current_buffer)} frames in {capture_duration:.2f}s. Actual FPS: {actual_fps:.2f}. Recording stopped.")
+                            # NEW: Calculate FPS from the collected timestamps for accuracy.
+                            if len(self.video_frame_timestamps) > 1:
+                                total_duration = self.video_frame_timestamps[-1] - self.video_frame_timestamps[0]
+                                num_intervals = len(self.video_frame_timestamps) - 1
+                                if total_duration > 0:
+                                    actual_fps = num_intervals / total_duration
+                                    self.last_video_actual_fps = actual_fps
+                                    print(f"🎬 Collected {len(current_buffer)} frames. Calculated FPS from timestamps: {actual_fps:.2f}. Recording stopped.")
+                                else:
+                                    self.last_video_actual_fps = float(self.fps)
+                                    print(f"🎬 Collected {len(current_buffer)} frames, but duration was zero. Falling back to target {self.fps} FPS.")
                             else:
-                                # Fallback to target FPS if duration is zero, though this is unlikely
+                                # Fallback if not enough timestamps were collected
                                 self.last_video_actual_fps = float(self.fps)
-                                print(f"🎬 Collected {len(current_buffer)} frames. Could not calculate actual FPS, falling back to target {self.fps} FPS.")
+                                print(f"🎬 Collected {len(current_buffer)} frames. Could not calculate FPS from timestamps, falling back to target {self.fps} FPS.")
+                            
+                            # Clear the timestamps for the next recording session
+                            self.video_frame_timestamps.clear()
 
             except Exception as e:
                 if not self.stop_event.is_set():
