@@ -1,12 +1,16 @@
-# Two-Stage Hailo Inference
+# Two-Stage Hailo Inference Pipeline
 
-A two-stage machine learning inference system that combines object detection and classification for invertebrate species identification. The system uses Hailo hardware acceleration for efficient edge computing.
+A two-stage machine learning pipeline that combines continuous video recording with asynchronous processing for invertebrate species identification. The system uses Hailo hardware acceleration for efficient edge computing.
 
 ## Project Structure
 
 ```
 twostage-hailo-inference/
-├── run.py                    # Main entry point (renamed from two-stage-edge.py)
+├── run.py                    # Main entry point for the continuous pipeline
+├── main/                     # Core pipeline components
+│   ├── __init__.py
+│   ├── record_video.py       # Gapless video recording component
+│   └── inference_from_video.py # Video processing and inference component
 ├── models/                   # ML-related modules
 │   ├── __init__.py
 │   ├── classification.py     # Classification inference
@@ -27,77 +31,70 @@ twostage-hailo-inference/
 
 ## Asynchronous Architecture
 
-The system is designed with a multi-threaded architecture to ensure real-time performance by handling different tasks concurrently.
+The system is designed with a multi-threaded, queue-based architecture to ensure robust, continuous operation.
 
-- **Frame Grabber Thread**: A dedicated thread's only job is to communicate with the camera. It continuously captures frames and places them into a `frame_queue`. If sanity video recording is active, it also copies these frames into a separate `video_buffer`. This ensures that the main application always has the latest frame available without waiting for the camera hardware.
+- **Recorder Thread**: A dedicated thread that runs the `VideoRecorder`. Its only job is to perform continuous, "gapless" video recording. It saves video segments to disk and places the file path of a completed video into a `Video Queue`. An internal frame-grabbing thread ensures that frames are not missed while a video file is being saved.
 
-- **Main Processing Thread**: This is the central coordinator. It runs in the main thread and performs the following tasks:
-    - Takes a frame from the `frame_queue`.
-    - Runs the computationally-heavy object detection and classification models on the frame.
-    - Once every `upload_interval`, it hands off the collected detection data and video frames to the uploader thread.
+- **Processor Thread**: This thread acts as a consumer, waiting for video file paths to appear in the `Video Queue`. For each video, it performs the entire processing workflow sequentially:
+    1.  Runs the two-stage inference model (detection and classification).
+    2.  Uploads all generated detection data.
+    3.  Randomly decides whether to upload the source video file based on a configured percentage.
+    4.  Deletes the local video file to conserve disk space.
 
-- **Uploader Thread**: Another dedicated thread handles all slow I/O operations. It waits for data to appear in the `uploader_queue`. When the main thread provides a batch of data, this uploader thread:
-    - Encodes the buffered frames into a .mp4 video file.
-    - Uploads the detection data and the newly created video file over the network.
+- **Main Thread**: The main thread initializes the pipeline, starts the recorder and processor threads, and then waits, primarily to catch a `KeyboardInterrupt` (Ctrl+C) for a graceful shutdown.
 
-This asynchronous, multi-threaded design is crucial. It prevents the high-latency tasks of video encoding and network uploads from blocking the main processing loop, allowing the system to keep up with the camera's frame rate without dropping frames.
+This decoupled design ensures that the recording process is never blocked by the computationally intensive inference or slow network uploads.
 
 ```mermaid
 graph TD
-    subgraph "Parallel Threads"
-        subgraph "Thread 1: Frame Grabber"
-            Cam([Camera]) --> T1(Capture Frames)
-            T1 --> FQ{{Frame Queue}}
-            T1 --> SVB{{Sanity Video Buffer}}
-        end
-
-        subgraph "Thread 2: Main Processing"
-            T2("Detect, Crop, Classify")
-            FQ --> T2
-            T2 --> DB{{Detections}}
-        end
-        
-        subgraph "Thread 3: Uploader"
-            T3(Encode & Upload)
-            UQ{{Upload Queue}} --> T3
-            T3 --> Cloud((Cloud API))
-        end
+    subgraph Main Thread
+        A[Start run.py] --> B(Create Video Queue);
+        B --> C{Start Recorder Thread};
+        B --> D{Start Processor Thread};
     end
 
-    DB --> UQ
-    SVB --> UQ
+    subgraph Recorder Thread [Gapless Recording]
+        C --> E[Frame Grabber Loop];
+        E --> F([Frame Queue]);
+        G[Video Saving Loop] --> H{Records Segment 1};
+        F --> G;
+        H -- File Path --> B;
+        H --> I{Records Segment 2};
+        F --> I;
+        I -- File Path --> B;
+    end
+    
+    subgraph Processor Thread [Sequential Processing]
+        D --> J(Wait for Video);
+        B -- File Path --> J;
+        J --> K[Run Inference];
+        K --> L[Upload Detections];
+        L --> M{Upload Video?};
+        M --> N[Delete Video];
+        N --> J;
+    end
+
+    style F fill:#f9f,stroke:#333,stroke-width:2px
+    style B fill:#f9f,stroke:#333,stroke-width:2px
 ```
 
 ## Available Commands
 
-### Real-time Inference (Camera Mode)
+### Running the Pipeline
 
 ```bash
-# Real-time inference WITHOUT database uploads (recommended for performance)
+# Run with default settings (records 5-min segments, 10% video upload chance)
 python3 run.py
 
-# Real-time inference WITH database uploads
-python3 run.py --enable-uploads
+# Run with a different video directory and recording duration
+python3 run.py --video-dir /media/storage/videos --duration 600
 
-# Run in headless mode (no display window)
-python3 run.py --headless
+# Disable all uploads for testing
+python3 run.py --disable-uploads
 
-# Custom device ID for uploads
-python3 run.py --enable-uploads --device-id "my_device_001"
-
-# Enable sanity video recording (10% of upload interval)
-python3 run.py --enable-uploads --sanity-video-percent 10
+# Customize FPS and resolution
+python3 run.py --fps 20 --resolution 1280x720
 ```
-
-**What it does:**
-- Captures live video from PiCamera2
-- Performs real-time object detection and species classification
-- Shows bounding boxes and classification results on screen
-- Press 'q' to quit
-
-**Upload behavior:**
-- **Default**: Database uploads are **DISABLED** for better performance
-- **With `--enable-uploads`**: Database uploads are **ENABLED** but may cause frame drops due to network delays
 
 ### Command Line Options
 
@@ -107,18 +104,14 @@ python3 run.py --help
 ```
 
 **Available Arguments:**
-- `--enable-uploads`: Enable database uploads (disabled by default for performance)
-- `--headless`: Run without display window (useful for remote deployment)
-- `--upload-interval N`: Set upload interval in seconds (default: 60)
-- `--sanity-video-percent N`: Record sanity videos for N% of upload interval (default: 0, disabled)
-- `--device-id "ID"`: Set custom device identifier for uploads (default: "test_pipeline2")
-
-### Help
-
-```bash
-# Show available commands and options
-python3 run.py --help
-```
+- `--video-dir PATH`: Directory to save and monitor videos (default: `recordings`).
+- `--duration SECONDS`: Duration of each video segment in seconds (default: 300).
+- `--upload-percentage N`: Percentage of video *files* to upload (0-100) (default: 10).
+- `--device-id "ID"`: Device identifier for uploads (default: "pipeline").
+- `--fps N`: Recording frame rate (default: 15).
+- `--resolution WxH`: Recording resolution in `WIDTHxHEIGHT` format (default: `640x640`).
+- `--confidence N`: Confidence threshold for detections (default: 0.35).
+- `--disable-uploads`: Disable all database uploads (detections and videos).
 
 ## Environment Setup
 
@@ -135,38 +128,24 @@ SENSING_GARDEN_API_KEY=your_api_key_here
 AWS_ACCESS_KEY_ID=your_aws_access_key
 AWS_SECRET_ACCESS_KEY=your_aws_secret_key
 AWS_REGION=us-east-1
-
-# Optional: Override default region
-# AWS_REGION=eu-west-1
 ```
 
 ### 2. Required Environment Variables
 
-| Variable | Required | Description | Default |
-|----------|----------|-------------|---------|
-| `API_BASE_URL` | Yes | Base URL for the Sensing Garden API | None |
-| `SENSING_GARDEN_API_KEY` | Yes | API key for authentication | None |
-| `AWS_ACCESS_KEY_ID` | Yes | AWS access key for S3 storage | None |
-| `AWS_SECRET_ACCESS_KEY` | Yes | AWS secret key for S3 storage | None |
-| `AWS_REGION` | No | AWS region for S3 bucket | `us-east-1` |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `API_BASE_URL` | Yes | Base URL for the Sensing Garden API |
+| `SENSING_GARDEN_API_KEY` | Yes | API key for authentication |
+| `AWS_ACCESS_KEY_ID` | Yes | AWS access key for S3 storage |
+| `AWS_SECRET_ACCESS_KEY` | Yes | AWS secret key for S3 storage |
+| `AWS_REGION` | No | AWS region for S3 bucket (default: `us-east-1`) |
 
 ### 3. Device and Model Configuration
 
-**Device ID**: Use the `--device-id` command line argument to set your device identifier:
+All primary configuration is now handled via command-line arguments in `run.py`. The `device-id` is set with the `--device-id` flag.
 
-```bash
-python3 run.py --enable-uploads --device-id "my_edge_device_001"
-```
-
-**Model ID**: The system uses a hardcoded model identifier. To customize it, edit this line in `run.py`:
-
-```python
-# In the InferenceProcessor.__init__ method (around line 39)
-self.model_id = "london_141"         # Change this to your model identifier
-```
-
-These values are used to tag your detections in the database for organization and tracking purposes.
+The model files and species lists are referenced by file path in the code. If you need to change them, you can edit the default paths in the `VideoInferenceProcessor` class inside `main/inference_from_video.py`.
 
 ### 4. Model Files
 
-Ensure you have the required model files in the `
+Ensure you have the required model files in the `weights/` directory.
