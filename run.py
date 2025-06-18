@@ -6,6 +6,7 @@ import argparse
 import random
 import logging
 import requests
+import cv2
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -171,30 +172,106 @@ class ContinuousPipeline:
         return random.randint(1, 100) <= self.upload_percentage
 
     def upload_video_file(self, video_path):
-        """Upload a raw video file, using the filename for the timestamp."""
-        if not self.enable_uploads or not self.sgc:
-            logger.warning(f"Uploads disabled, skipping video upload for {video_path.name}")
+        """
+        Extracts a random segment of the video and uploads it.
+        The duration of the segment is determined by self.upload_percentage.
+        """
+        if not self.enable_uploads or not self.sgc or self.upload_percentage == 0:
+            if self.upload_percentage > 0:
+                logger.warning(f"Uploads disabled, skipping video upload for {video_path.name}")
             return
         
+        if not (0 < self.upload_percentage <= 100):
+            logger.error(f"Invalid upload percentage: {self.upload_percentage}. Must be between 1 and 100.")
+            return
+
+        cap = None
+        out = None
+        temp_segment_path = None
         try:
-            # --- Derive timestamp from filename ---
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                logger.error(f"Could not open video file to create segment: {video_path.name}")
+                return
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            if total_frames == 0 or fps == 0:
+                logger.error(f"Video {video_path.name} has no frames or invalid FPS, cannot create segment.")
+                return
+
+            # Calculate segment length in frames
+            segment_length_frames = int(total_frames * (self.upload_percentage / 100.0))
+            if segment_length_frames <= 0:
+                logger.warning(f"Calculated segment length is 0 frames for {video_path.name}. Skipping upload.")
+                return
+
+            # Determine random start frame
+            max_start_frame = total_frames - segment_length_frames
+            start_frame = random.randint(0, max_start_frame) if max_start_frame > 0 else 0
+
+            # Create a temporary path for the segment
+            temp_segment_path = video_path.with_name(f"segment_{video_path.name}")
+
+            logger.info(f"📤 Creating a {self.upload_percentage}% ({segment_length_frames / fps:.1f}s) segment from {video_path.name}")
+            
+            # Set up writer for the segment
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(str(temp_segment_path), fourcc, fps, (width, height))
+
+            # Position the capture to the start frame
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            
+            frames_written = 0
+            while frames_written < segment_length_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                out.write(frame)
+                frames_written += 1
+
+            # Release resources before upload
+            cap.release()
+            cap = None
+            out.release()
+            out = None
+
+            if not temp_segment_path.exists() or temp_segment_path.stat().st_size == 0:
+                logger.error("Failed to create a valid video segment. Skipping upload.")
+                return
+
+            # --- Derive timestamp from original filename ---
             timestamp_str = video_path.stem.replace(f"{self.device_id}_", "")
             video_datetime = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
             iso_timestamp = video_datetime.isoformat()
             
-            logger.info(f"📤 Uploading video file: {video_path.name} with timestamp {iso_timestamp}")
-            with open(video_path, "rb") as f:
+            logger.info(f"📤 Uploading video segment: {temp_segment_path.name} with timestamp {iso_timestamp}")
+            with open(temp_segment_path, "rb") as f:
                 video_data = f.read()
-            
+
             self.sgc.videos.upload_video(
                 device_id=self.device_id,
                 timestamp=iso_timestamp,
                 video_path_or_data=video_data,
                 content_type="video/mp4"
             )
-            logger.info(f"✅ Video file uploaded successfully: {video_path.name}")
+            logger.info(f"✅ Video segment uploaded successfully: {temp_segment_path.name}")
         except Exception as e:
-            logger.error(f"❌ Error uploading video file {video_path.name}: {e}")
+            logger.error(f"❌ Error creating or uploading video segment for {video_path.name}: {e}", exc_info=True)
+        finally:
+            if cap:
+                cap.release()
+            if out:
+                out.release()
+            if temp_segment_path and temp_segment_path.exists():
+                try:
+                    temp_segment_path.unlink()
+                    logger.info(f"🗑️ Deleted temporary segment: {temp_segment_path.name}")
+                except Exception as e:
+                    logger.error(f"⚠️ Could not delete temporary segment {temp_segment_path.name}: {e}")
             
     def delete_video(self, video_path):
         """Delete a video file after processing."""
@@ -254,7 +331,7 @@ def main():
     parser = argparse.ArgumentParser(description='Continuous video recording and inference pipeline.')
     parser.add_argument('--video-dir', type=str, default='recordings', help='Directory to save and monitor videos.')
     parser.add_argument('--duration', type=int, default=300, help='Duration of each video segment in seconds.')
-    parser.add_argument('--upload-percentage', type=int, default=10, help='Percentage of video *files* to upload (0-100).')
+    parser.add_argument('--upload-percentage', type=int, default=10, help='Percentage of video *duration* to upload as a random segment (0-100).')
     parser.add_argument('--device-id', type=str, default='pipeline', help='Device identifier for uploads.')
     parser.add_argument('--fps', type=int, default=15, help='Recording frame rate.')
     parser.add_argument('--resolution', type=str, default='640x640', help='Recording resolution in WIDTHxHEIGHT format.')
