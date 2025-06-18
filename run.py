@@ -541,6 +541,9 @@ class CameraStreamer:
         self.video_buffers = {'A': [], 'B': []}
         self.active_video_buffer_key = 'A'
         self.is_recording = False
+        # FPS measurement for debugging
+        self.frame_times = []
+        self.last_fps_report_time = 0
         self.frame_grabber_thread = threading.Thread(
             target=self._frame_grabber_worker,
             daemon=True
@@ -561,8 +564,23 @@ class CameraStreamer:
         print("Frame grabber worker started.")
         while not self.stop_event.is_set():
             try:
+                frame_start_time = time.time()
                 frame = self.picam2.capture_array()
                 self.frame_queue.put(frame)
+                
+                # FPS measurement for debugging
+                self.frame_times.append(frame_start_time)
+                # Keep only the last 100 frame times for rolling average
+                if len(self.frame_times) > 100:
+                    self.frame_times.pop(0)
+                
+                # Report FPS every 5 seconds
+                if frame_start_time - self.last_fps_report_time >= 5.0 and len(self.frame_times) > 1:
+                    time_span = self.frame_times[-1] - self.frame_times[0]
+                    if time_span > 0:
+                        actual_fps = (len(self.frame_times) - 1) / time_span
+                        print(f"🎯 Frame grabber actual FPS: {actual_fps:.2f} (configured: {self.fps})")
+                    self.last_fps_report_time = frame_start_time
 
                 with self.video_lock:
                     if self.is_recording:
@@ -631,6 +649,7 @@ class CameraStreamer:
                     final_video_duration = len(video_to_upload) / video_fps if video_fps > 0 else 0
                     print(f"📹 Assembling video: {len(video_to_upload)} frames captured.")
                     print(f"📹 Playback: {final_video_duration:.2f}s video at camera's configured {video_fps:.1f} FPS.")
+                    print(f"📹 DEBUG: Using {video_fps} FPS for video encoding (configured camera FPS: {self.fps})")
 
                 if detections_to_upload or video_to_upload:
                     print(f"Queuing {len(detections_to_upload)} detections and {len(video_to_upload)} video frames for upload.")
