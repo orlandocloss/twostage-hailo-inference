@@ -207,6 +207,20 @@ class ContinuousPipeline:
     def start(self):
         """Start the continuous pipeline."""
         logger.info("🚀 Starting Continuous Pipeline...")
+        
+        # Scan for and queue any existing videos from previous runs
+        logger.info(f"Scanning for existing videos in {self.video_dir}...")
+        try:
+            existing_videos = sorted(self.video_dir.glob("*.mp4"))
+            if existing_videos:
+                logger.info(f"Found {len(existing_videos)} existing video(s). Adding to processing queue.")
+                for video_path in existing_videos:
+                    self.video_queue.put(video_path)
+            else:
+                logger.info("No existing videos found.")
+        except Exception as e:
+            logger.error(f"Error scanning for existing videos: {e}")
+
         self.recorder_thread = threading.Thread(target=self.recorder.start_continuous_recording, daemon=True)
         self.processor_thread = threading.Thread(target=self.processor_worker, daemon=True)
         self.recorder_thread.start()

@@ -92,8 +92,7 @@ class VideoRecorder:
             while time.time() - start_time < self.recording_duration:
                 try:
                     frame = self.frame_queue.get(timeout=1)
-                    bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                    out.write(bgr_frame)
+                    out.write(frame)
                     frame_count += 1
                 except queue.Empty:
                     if self.stop_event.is_set():
