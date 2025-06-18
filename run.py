@@ -629,13 +629,15 @@ class CameraStreamer:
                 print(f"\n--- Upload interval of {self.upload_interval}s reached. Offloading data for async upload. ---")
                 detections_to_upload = self.processor.get_full_buffer_and_swap()
                 
+                video_to_upload = []
+                video_fps = float(self.fps) # Default to target FPS
                 with self.video_lock:
                     video_to_upload = self.video_buffers[self.active_video_buffer_key]
                     self.video_buffers[self.active_video_buffer_key] = []
                     self.active_video_buffer_key = 'B' if self.active_video_buffer_key == 'A' else 'A'
+                    # Safely read the last measured FPS. This is critical for correct playback speed.
+                    video_fps = self.last_video_actual_fps
 
-                # Use the measured FPS for the video.
-                video_fps = self.last_video_actual_fps
                 if self.sanity_video_percent > 0 and video_to_upload:
                     final_video_duration = len(video_to_upload) / video_fps if video_fps > 0 else 0
                     print(f"📹 Assembling video: {len(video_to_upload)} frames captured.")
